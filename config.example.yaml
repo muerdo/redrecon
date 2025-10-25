@@ -1,0 +1,30 @@
+# RedRecon Configuration Example
+# Copy this file to config.yaml and customize it for your environment.
+
+engine:
+  # Maximum number of tasks to run in parallel.
+  max_parallel_tasks: 10
+
+recon:
+  # Configuration for reconnaissance steps
+  ffuf:
+    # Path to the wordlist for directory/file fuzzing.
+    # Recommended: https://github.com/danielmiessler/SecLists/blob/master/Discovery/Web-Content/directory-list-2.3-medium.txt
+    wordlist: ""
+
+  nuclei:
+    # Default templates to use in the 'recon' workflow.
+    # These can be tags, paths, or template IDs.
+    templates:
+      - "technologies"
+      - "vulnerabilities"
+      - "cves"
+      - "default-logins"
+      - "cloud"
+
+    # Templates to use for the 'owasp' step.
+    owasp_templates: []
+
+  bbot:
+    # Profile to use for the bbot scan (e.g., recon-light, recon-heavy, full).
+    profile: "recon-light"

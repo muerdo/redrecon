@@ -1,0 +1,9 @@
+# Binários compilados
+redrecon
+*.exe
+
+# Arquivos de configuração locais (não devem ser versionados)
+config.yaml
+
+# Diretório de resultados
+results/
