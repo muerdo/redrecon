@@ -8,9 +8,6 @@ import (
 	"strings"
 
 	"redrecon/internal/config"
-	"redrecon/pkg/discord"
-	"redrecon/pkg/infra"
-	"redrecon/pkg/monitor"
 	"redrecon/cmd/redrecon/cmd"
 
 	"github.com/spf13/cobra"
@@ -88,10 +85,6 @@ func main() {
 
 	// This needs to be called before Execute because initConfig is called by cobra.OnInitialize
 	initConfig()
-
-	// Wire up command handlers for the Discord bot to break import cycles.
-	discord.StartMonitorFunc = monitor.Start
-	discord.StartInfraFunc = infra.StartInfraScan
 
 	if err := rootCmd.Execute(); err != nil {
 		slog.Error("Whoops. There was an error while executing your CLI", "error", err)

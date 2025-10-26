@@ -29,6 +29,7 @@ sudo apt update && sudo apt install -y subfinder dnsutils nmap nuclei nikto what
 # Install Go-based tools
 go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
 go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install -v github.com/projectdiscovery/dnsvalidator/cmd/dnsvalidator@latest
 go install -v github.com/projectdiscovery/katana/cmd/katana@latest
 go install -v github.com/tomnomnom/waybackurls@latest
 ```
@@ -56,7 +57,7 @@ You can move the `redrecon` binary to a directory in your `PATH` for easy access
 
 ## Usage
 
-redrecon-Go is organized into several commands.
+RedRecon is organized into several commands.
 
 ### Reconnaissance (`recon`)
 

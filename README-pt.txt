@@ -29,11 +29,9 @@ sudo apt update && sudo apt install -y subfinder dnsutils nmap nuclei nikto what
 # Instale ferramentas baseadas em Go
 go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
 go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install -v github.com/projectdiscovery/dnsvalidator/cmd/dnsvalidator@latest
 go install -v github.com/projectdiscovery/katana/cmd/katana@latest
 go install -v github.com/tomnomnom/waybackurls@latest
-go install -v github.com/bwmarrin/discordgo@latest # Para o bot do Discord
-go install -v golang.org/x/net/publicsuffix@latest
-go install -v github.com/ditashi/jsbeautifier-go@latest
 
 
 3. Compile o RedRecon
@@ -55,17 +53,6 @@ Configuração
 2. Edite `config.yaml` para adicionar suas chaves de API e personalizar caminhos para wordlists. Isso é crucial para que ferramentas como o `subfinder` funcionem de forma eficaz.
 
 Uso
-
-**Bot do Discord**
-
-Para usar o bot do Discord, você precisa:
-1. Criar um aplicativo de bot no Discord Developer Portal.
-2. Obter o token do bot e adicioná-lo ao `config.yaml` em `engine.discord.token`.
-3. Convidar o bot para o seu servidor Discord com as permissões necessárias (ler mensagens, enviar mensagens).
-4. Habilitar o bot em `config.yaml` definindo `engine.discord.enabled: true`.
-5. Inicie o RedRecon. O bot será iniciado em segundo plano.
-6. Inicie o bot com o comando dedicado:
-   ./redrecon bot start
 
 O RedRecon é organizado em vários comandos.
 

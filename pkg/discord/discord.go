@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"redrecon/internal/config"
 	"redrecon/pkg/recon"
-	"redrecon/pkg/search"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -171,27 +170,11 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 				go StartMonitorFunc([]string{targetArg}, frequency)
 				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("✅ Monitoramento iniciado para `%s`.", targetArg))
 			}
-		case "search":
-			if len(cmdArgs) < 1 {
-				s.ChannelMessageSend(m.ChannelID, "Uso: `!search <termo>`")
-				return
-			}
-			searchTerm := strings.Join(cmdArgs, " ")
-			// A busca é rápida, então podemos fazer de forma síncrona.
-			// A flag noColor=true é para evitar caracteres de controle de cor no arquivo/mensagem.
-			output, err := search.ExecuteSearch(searchTerm, "", false, false)
-			if err != nil {
-				customLogger.Error("A busca falhou", "error", err)
-				return
-			}
-			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("📄 Aqui estão os resultados da busca por: `%s`", searchTerm))
-			s.ChannelFileSend(m.ChannelID, "search_results.txt", strings.NewReader(output))
 		case "help":
 			helpMsg := "Comandos disponíveis:\n" +
 				"`!recon <target>` - Inicia um reconhecimento web completo.\n" +
 				"`!infra <target>` - Inicia uma varredura de infraestrutura.\n" +
-				"`!monitor <target> [frequency]` - Inicia o monitoramento contínuo (ex: `!monitor example.com 12h`).\n" +
-				"`!search <termo>` - Busca por um termo em todos os resultados."
+				"`!monitor <target> [frequency]` - Inicia o monitoramento contínuo (ex: `!monitor example.com 12h`)."
 			s.ChannelMessageSend(m.ChannelID, helpMsg)
 		default:
 			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Comando desconhecido: `%s`. Use `!help` para ver os comandos.", command))
