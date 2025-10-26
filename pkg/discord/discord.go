@@ -179,7 +179,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 			searchTerm := strings.Join(cmdArgs, " ")
 			// A busca é rápida, então podemos fazer de forma síncrona.
 			// A flag noColor=true é para evitar caracteres de controle de cor no arquivo/mensagem.
-			output, err := search.ExecuteSearch(searchTerm, "", false, false, true)
+			output, err := search.ExecuteSearch(searchTerm, "", false, false)
 			if err != nil {
 				customLogger.Error("A busca falhou", "error", err)
 				return
