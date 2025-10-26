@@ -5,6 +5,7 @@ go 1.24.1
 replace github.com/olekukonko/tablewriter => github.com/olekukonko/tablewriter v0.0.5
 
 require (
+	github.com/bwmarrin/discordgo v0.29.0
 	github.com/gocolly/colly/v2 v2.2.0
 	github.com/logrusorgru/aurora v2.0.3+incompatible
 	github.com/projectdiscovery/nuclei/v3 v3.3.3
@@ -12,6 +13,7 @@ require (
 	github.com/spf13/cobra v1.10.1
 	github.com/spf13/viper v1.21.0
 	github.com/twmb/murmur3 v1.1.6
+	golang.org/x/net v0.42.0
 	rsc.io/pdf v0.1.1
 )
 
@@ -148,6 +150,7 @@ require (
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
+	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/h2non/filetype v1.1.3 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
@@ -326,7 +329,6 @@ require (
 	golang.org/x/crypto v0.40.0 // indirect
 	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8 // indirect
 	golang.org/x/mod v0.26.0 // indirect
-	golang.org/x/net v0.42.0 // indirect
 	golang.org/x/oauth2 v0.27.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/sys v0.34.0 // indirect

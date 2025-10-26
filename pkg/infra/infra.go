@@ -20,13 +20,15 @@ type infraState struct {
 	subdomainsFile  string
 	ipsFile         string
 	ipsOnlyFile     string // Arquivo contendo apenas os IPs para o Nmap
+	httpxFile       string // Arquivo com portas e tecnologias do httpx
+	logger          *slog.Logger
 	nmapFile        string
 	nucleiInfraFile string
 }
 
 type infraStep func(state *infraState) error
 
-func StartInfraScan(target string, skipSteps []string) error {
+func StartInfraScan(target string, skipSteps []string, logger *slog.Logger) (string, error) {
 	slog.Info("Starting infrastructure scan process", "target", target)
 
 	sanitizedTarget := sanitizeTargetForPath(target)
@@ -35,7 +37,7 @@ func StartInfraScan(target string, skipSteps []string) error {
 
 	if err := os.MkdirAll(resultsPath, 0755); err != nil {
 		slog.Error("Failed to create directory", "path", resultsPath, "error", err)
-		return fmt.Errorf("could not create directory %s: %w", resultsPath, err)
+		return "", fmt.Errorf("could not create directory %s: %w", resultsPath, err)
 	}
 
 	state := &infraState{
@@ -45,6 +47,8 @@ func StartInfraScan(target string, skipSteps []string) error {
 		subdomainsFile:  filepath.Join(resultsPath, "subdomains.txt"),
 		ipsFile:         filepath.Join(resultsPath, "resolved_ips.txt"),
 		ipsOnlyFile:     filepath.Join(resultsPath, "ips_only.txt"),
+		httpxFile:       filepath.Join(resultsPath, "httpx_infra.json"),
+		logger:          logger,
 		nmapFile:        filepath.Join(resultsPath, "nmap_scan.txt"),
 		nucleiInfraFile: filepath.Join(resultsPath, "nuclei_infra_scan.txt"),
 	}
@@ -57,88 +61,104 @@ func StartInfraScan(target string, skipSteps []string) error {
 	workflow := map[string]infraStep{
 		"subfinder": stepRunSubfinder,
 		"dnsx":      stepRunDnsx,
+		"httpx":     stepRunHttpx,
 		"nmap":      stepRunNmap,
 		"nuclei":    stepRunNuclei,
 	}
 
-	executionOrder := []string{"subfinder", "dnsx", "nmap", "nuclei"}
+	executionOrder := []string{"subfinder", "dnsx", "httpx", "nmap", "nuclei"}
 
 	for _, stepName := range executionOrder {
 		if _, shouldSkip := skipSet[stepName]; shouldSkip {
-			slog.Warn("Skipping infra step as requested", "step", stepName)
+			state.logger.Warn("Skipping infra step as requested", "step", stepName)
 			continue
 		}
 
 		stepFunc := workflow[stepName]
 		if err := stepFunc(state); err != nil {
-			slog.Error("An infrastructure scan step failed", "step", stepName, "error", err)
+			state.logger.Error("An infrastructure scan step failed", "step", stepName, "error", err)
 		}
 	}
 
 	slog.Info("Infrastructure scan process completed.")
-	return nil
+	return generateInfraSummary(state)
 }
 
 func stepRunSubfinder(state *infraState) error {
-	slog.Info("--- [Infra] Starting: Passive Subdomain Enumeration (subfinder) ---")
+	state.logger.Info("--- [Infra] Starting: Passive Subdomain Enumeration (subfinder) ---")
 	cmd := exec.CommandContext(state.ctx, "subfinder", "-d", state.target, "-o", state.subdomainsFile, "-silent")
-	if err := runCommand(cmd, "subfinder"); err != nil {
+	if err := runCommand(cmd, "subfinder", state.logger); err != nil {
 		return err
 	}
-	slog.Info("[Infra] Subfinder completed", "output_file", state.subdomainsFile)
+	state.logger.Info("[Infra] Subfinder completed", "output_file", state.subdomainsFile)
 	return nil
 }
 
 func stepRunDnsx(state *infraState) error {
-	slog.Info("--- [Infra] Starting: IP Address Resolution (dnsx) ---")
+	state.logger.Info("--- [Infra] Starting: IP Address Resolution (dnsx) ---")
 	if !fileExistsAndIsNotEmpty(state.subdomainsFile) {
-		slog.Warn("[Infra] Subdomains file is empty, skipping dnsx.", "file", state.subdomainsFile)
+		state.logger.Warn("[Infra] Subdomains file is empty, skipping dnsx.", "file", state.subdomainsFile)
 		return nil
 	}
 	cmd := exec.CommandContext(state.ctx, "dnsx", "-l", state.subdomainsFile, "-a", "-resp", "-o", state.ipsFile, "-silent")
-	if err := runCommand(cmd, "dnsx"); err != nil {
+	if err := runCommand(cmd, "dnsx", state.logger); err != nil {
 		return err
 	}
-	slog.Info("[Infra] Dnsx completed", "output_file", state.ipsFile)
+	state.logger.Info("[Infra] Dnsx completed", "output_file", state.ipsFile)
+	return nil
+}
+
+func stepRunHttpx(state *infraState) error {
+	state.logger.Info("--- [Infra] Starting: Port and Technology Detection (httpx) ---")
+	if !fileExistsAndIsNotEmpty(state.subdomainsFile) {
+		state.logger.Warn("[Infra] Subdomains file is empty, skipping httpx.", "file", state.subdomainsFile)
+		return nil
+	}
+	// httpx can take a list of domains and will resolve them.
+	// We also ask it to probe all ports and detect technologies.
+	cmd := exec.CommandContext(state.ctx, "httpx", "-l", state.subdomainsFile, "-ports", "all", "-tech-detect", "-json", "-o", state.httpxFile, "-silent")
+	if err := runCommand(cmd, "httpx", state.logger); err != nil {
+		return err
+	}
+	state.logger.Info("[Infra] Httpx port/tech scan completed", "output_file", state.httpxFile)
 	return nil
 }
 
 func stepRunNmap(state *infraState) error {
-	slog.Info("--- [Infra] Starting: Port Scanning (nmap) ---")
+	state.logger.Info("--- [Infra] Starting: Port Scanning (nmap) ---")
 	if !fileExistsAndIsNotEmpty(state.ipsFile) {
-		slog.Warn("[Infra] IPs file is empty, skipping nmap.", "file", state.ipsFile)
+		state.logger.Warn("[Infra] IPs file is empty, skipping nmap.", "file", state.ipsFile)
 		return nil
 	}
 
 	err := extractIPs(state.ipsFile, state.ipsOnlyFile)
 	if err != nil {
-		return fmt.Errorf("failed to extract IPs for nmap: %w", err)
+		return fmt.Errorf("failed to extract IPs for nmap: %w", err) // This function doesn't log, so it's ok
 	}
 
 	if !fileExistsAndIsNotEmpty(state.ipsOnlyFile) {
-		slog.Warn("[Infra] No IPs were extracted, skipping nmap.", "file", state.ipsOnlyFile)
+		state.logger.Warn("[Infra] No IPs were extracted, skipping nmap.", "file", state.ipsOnlyFile)
 		return nil
 	}
 
 	cmd := exec.CommandContext(state.ctx, "nmap",
 		"-iL", state.ipsOnlyFile,
-		"-oN", state.nmapFile,
-		"-sV",
-		"-T4",
-		"--top-ports", "1000",
-		"--open",
+		"-oN", state.nmapFile, // Normal output
+		"-sV", // Version detection
+		"-sC", // Default scripts
+		"-T4", // Aggressive timing
 	)
-	if err := runCommand(cmd, "nmap"); err != nil {
+	if err := runCommand(cmd, "nmap", state.logger); err != nil {
 		return err
 	}
-	slog.Info("[Infra] Nmap scan completed", "output_file", state.nmapFile)
+	state.logger.Info("[Infra] Nmap scan completed", "output_file", state.nmapFile)
 	return nil
 }
 
 func stepRunNuclei(state *infraState) error {
-	slog.Info("--- [Infra] Starting: Service Vulnerability Scanning (nuclei) ---")
+	state.logger.Info("--- [Infra] Starting: Service Vulnerability Scanning (nuclei) ---")
 	if !fileExistsAndIsNotEmpty(state.ipsFile) {
-		slog.Warn("[Infra] IPs file is empty, skipping nuclei.", "file", state.ipsFile)
+		state.logger.Warn("[Infra] IPs file is empty, skipping nuclei.", "file", state.ipsFile)
 		return nil
 	}
 	cmd := exec.CommandContext(state.ctx, "nuclei",
@@ -147,10 +167,10 @@ func stepRunNuclei(state *infraState) error {
 		"-t", "network/",
 		"-silent",
 	)
-	if err := runCommand(cmd, "nuclei"); err != nil {
+	if err := runCommand(cmd, "nuclei", state.logger); err != nil {
 		return err
 	}
-	slog.Info("[Infra] Nuclei scan on services completed", "output_file", state.nucleiInfraFile)
+	state.logger.Info("[Infra] Nuclei scan on services completed", "output_file", state.nucleiInfraFile)
 	return nil
 }
 
@@ -164,13 +184,13 @@ func fileExistsAndIsNotEmpty(path string) bool {
 	return !os.IsNotExist(err) && stat.Size() > 0
 }
 
-func runCommand(cmd *exec.Cmd, toolName string) error {
+func runCommand(cmd *exec.Cmd, toolName string, logger *slog.Logger) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	slog.Info("Executing command", "tool", toolName, "args", cmd.Args)
+	logger.Info("Executing command", "tool", toolName, "args", cmd.Args)
 	err := cmd.Run()
 	if err != nil {
-		slog.Error("Command failed", "tool", toolName, "error", err, "stderr", stderr.String())
+		logger.Error("Command failed", "tool", toolName, "error", err, "stderr", stderr.String())
 		return fmt.Errorf("%s execution failed: %w\nStderr: %s", toolName, err, stderr.String())
 	}
 	return nil
@@ -192,7 +212,7 @@ func extractIPs(inputFile, outputFile string) error {
 	uniqueIPs := make(map[string]struct{})
 	writer := bufio.NewWriter(outFile)
 	scanner := bufio.NewScanner(inFile)
-	ipRegex := regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`)
+	ipRegex := regexp.MustCompile(`\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -211,4 +231,36 @@ func extractIPs(inputFile, outputFile string) error {
 	}
 
 	return writer.Flush()
+}
+
+func generateInfraSummary(state *infraState) (string, error) {
+	var summary strings.Builder
+	summary.WriteString(fmt.Sprintf("✅ **Infra Scan Summary for: %s**\n\n", state.target))
+
+	// Helper to count lines in a file
+	countLines := func(path string) int {
+		if !fileExistsAndIsNotEmpty(path) {
+			return 0
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return 0
+		}
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		count := 0
+		for scanner.Scan() {
+			count++
+		}
+		return count
+	}
+
+	summary.WriteString(fmt.Sprintf("• **Subdomains Found:** %d\n", countLines(state.subdomainsFile)))
+	summary.WriteString(fmt.Sprintf("• **Resolved IPs:** %d\n", countLines(state.ipsOnlyFile)))
+	summary.WriteString(fmt.Sprintf("• **Nmap Scan Results:** Check `%s`\n", state.nmapFile))
+	summary.WriteString(fmt.Sprintf("• **Nuclei Infra Findings:** %d\n", countLines(state.nucleiInfraFile)))
+
+	summary.WriteString(fmt.Sprintf("\n*Full results are saved in:* `%s`", state.resultsPath))
+
+	return summary.String(), nil
 }

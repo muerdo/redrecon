@@ -80,11 +80,12 @@ type reconState struct {
 	liveSubdomainsFile   string
 	urlsFile             string
 	jsFindingsFile       string
+	techFile             string
 	htmlFindingsFile     string
 	vulnerabilityFile    string
 	metadataFile         string
 	resolversFile        string
-	fuzzFile             string
+	fuzzResultsDir       string
 	faviconFile          string
 	nucleiScanFile       string
 	cveScanFile          string
@@ -93,11 +94,12 @@ type reconState struct {
 	bbotScanFile         string
 	subdomainWordlist    string
 	fuzzWordlist         string
+	logger               *slog.Logger // Custom logger for this recon instance
 }
 
 type reconStep func(state *reconState) error
 
-func StartRecon(target string, skipSteps []string) error {
+func StartRecon(target string, skipSteps []string, logger *slog.Logger) (string, error) {
 	slog.Info("Starting reconnaissance process", "target", target)
 
 	sanitizedTarget := sanitizeTargetForPath(target)
@@ -105,9 +107,9 @@ func StartRecon(target string, skipSteps []string) error {
 	slog.Info("Creating output directory", "path", resultsPath)
 
 	err := os.MkdirAll(resultsPath, 0755)
-	if err != nil {
+	if err != nil && !os.IsExist(err) { // Check if error is not just directory already existing
 		slog.Error("Failed to create directory", "path", resultsPath, "error", err)
-		return fmt.Errorf("could not create directory %s: %w", resultsPath, err)
+		return "", fmt.Errorf("could not create directory %s: %w", resultsPath, err)
 	}
 
 	state := &reconState{
@@ -118,11 +120,13 @@ func StartRecon(target string, skipSteps []string) error {
 		liveSubdomainsFile: filepath.Join(resultsPath, "live_subdomains.txt"),
 		urlsFile:           filepath.Join(resultsPath, "urls.txt"),
 		jsFindingsFile:     filepath.Join(resultsPath, "js_findings.txt"),
+		logger:             logger, // Assign the custom logger
+		techFile:           filepath.Join(resultsPath, "httpx_tech.json"),
 		htmlFindingsFile:   filepath.Join(resultsPath, "html_findings.txt"),
 		vulnerabilityFile:  filepath.Join(resultsPath, "vulnerability_findings.txt"),
 		metadataFile:       filepath.Join(resultsPath, "metadata.txt"),
 		resolversFile:      filepath.Join(resultsPath, "resolvers.txt"),
-		fuzzFile:           filepath.Join(resultsPath, "fuzzing_results.json"),
+		fuzzResultsDir:     filepath.Join(resultsPath, "ffuf_results"),
 		faviconFile:        filepath.Join(resultsPath, "favicon_hashes.json"),
 		nucleiScanFile:     filepath.Join(resultsPath, "nuclei_scan.txt"),
 		cveScanFile:        filepath.Join(resultsPath, "cve_results.json"),
@@ -158,7 +162,7 @@ func StartRecon(target string, skipSteps []string) error {
 		"bbot":          stepRunBBot,
 	}
 
-	executionOrder := []string{
+	executionOrder := []string{ // Define the order of execution
 		"subfinder", "dnsvalidator", "shuffledns", "httpx", "htmlanalysis", "favicon", "ffuf",
 		"csp", "katana", "wayback", "jsanalysis", "vulntests", "nuclei", "cvesearch", "owasp", "nikto", "bbot",
 	}
@@ -175,7 +179,7 @@ func StartRecon(target string, skipSteps []string) error {
 
 	for _, stepName := range executionOrder {
 		if _, shouldSkip := skipSet[stepName]; shouldSkip {
-			slog.Warn("Skipping step as requested", "step", stepName)
+			state.logger.Warn("Skipping step as requested", "step", stepName)
 			continue
 		}
 
@@ -187,7 +191,7 @@ func StartRecon(target string, skipSteps []string) error {
 		errChan := make(chan error, 1)
 
 		fmt.Printf("\n-> Press 's' and Enter to skip the current step: [%s]\n", stepName)
-
+		state.logger.Info(fmt.Sprintf("Starting step: %s", stepName))
 		go func() {
 			stepState := *state
 			stepState.ctx = stepCtx
@@ -197,131 +201,133 @@ func StartRecon(target string, skipSteps []string) error {
 		select {
 		case err := <-errChan:
 			if err != nil {
-				slog.Error("A reconnaissance step failed", "step", stepName, "error", err)
+				state.logger.Error("A reconnaissance step failed", "step", stepName, "error", err)
 			}
 		case input := <-skipInputChan:
 			if strings.ToLower(input) == "s" {
-				slog.Warn("User requested to skip step. Cancelling...", "step", stepName)
+				state.logger.Warn("User requested to skip step. Cancelling...", "step", stepName)
 				cancelStep()
 				<-errChan
-			}
+			} // else if input is not 's', it's ignored and the step continues
 		case <-state.ctx.Done():
 			slog.Info("Reconnaissance process cancelled.", "error", state.ctx.Err())
 			cancelStep()
-			return state.ctx.Err()
+			return "", state.ctx.Err()
 		}
 	}
 
 	slog.Info("Reconnaissance process completed.")
-	return nil
+	return generateReconSummary(state)
 }
 
 func stepRunSubfinder(state *reconState) error {
-	slog.Info("--- Starting: Passive Subdomain Enumeration (subfinder) ---")
-	err := runSubfinder(state.ctx, state.target, state.subdomainsFile)
+	state.logger.Info("--- Starting: Passive Subdomain Enumeration (subfinder) ---")
+	err := runSubfinder(state.ctx, state.target, state.subdomainsFile, state.logger)
 	if err == nil {
-		slog.Info("Passive Subdomain Enumeration completed", "output_file", state.subdomainsFile)
+		state.logger.Info("Passive Subdomain Enumeration completed", "output_file", state.subdomainsFile)
 	}
 	return err
 }
 
 func stepRunDNSValidator(state *reconState) error {
-	slog.Info("--- Starting: DNS Resolver Validation (dnsvalidator) ---")
-	err := runDNSValidator(state.ctx, state.resolversFile)
+	state.logger.Info("--- Starting: DNS Resolver Validation (dnsvalidator) ---")
+	err := runDNSValidator(state.ctx, state.resolversFile, state.logger)
 	if err == nil {
-		slog.Info("DNS Resolver Validation completed", "output_file", state.resolversFile)
+		state.logger.Info("DNS Resolver Validation completed", "output_file", state.resolversFile)
 	}
 	return err
 }
 
 func stepRunShuffleDNS(state *reconState) error {
-	slog.Info("--- Starting: Active Subdomain Enumeration (shuffledns) ---")
-	foundSubdomains, err := runShuffleDNS(state.ctx, state.target, state.subdomainWordlist, state.resolversFile, state.subdomainsFile)
+	state.logger.Info("--- Starting: Active Subdomain Enumeration (shuffledns) ---")
+	foundSubdomains, err := runShuffleDNS(state.ctx, state.target, state.subdomainWordlist, state.resolversFile, state.subdomainsFile, state.logger)
 	if err != nil {
 		return err
 	}
 	if len(foundSubdomains) > 0 {
-		slog.Info("Active Subdomain Enumeration completed", "new_subdomains", len(foundSubdomains))
+		state.logger.Info("Active Subdomain Enumeration completed", "new_subdomains", len(foundSubdomains))
 		return combineAndDeduplicateURLs(state.subdomainsFile, foundSubdomains)
 	}
-	slog.Info("Active Subdomain Enumeration completed with no new findings.")
+	state.logger.Info("Active Subdomain Enumeration completed with no new findings.")
 	return nil
 }
 
 func stepRunHttpx(state *reconState) error {
-	slog.Info("--- Starting: Live Subdomain Validation (httpx) ---")
-	err := runHttpx(state.ctx, state.subdomainsFile, state.liveSubdomainsFile)
+	state.logger.Info("--- Starting: Live Subdomain Validation (httpx) ---")
+	err := runHttpx(state.ctx, state.subdomainsFile, state.liveSubdomainsFile, state.techFile, state.logger)
 	if err == nil {
-		slog.Info("Live Subdomain Validation completed", "output_file", state.liveSubdomainsFile)
+		state.logger.Info("Live Subdomain Validation completed", "output_file", state.liveSubdomainsFile)
 	}
 	return err
 }
 
 func stepRunHTMLAnalysis(state *reconState) error {
-	slog.Info("--- Starting: HTML Source Code Analysis ---")
-	err := runHTMLAnalysis(state.ctx, state.liveSubdomainsFile, state.htmlFindingsFile)
+	state.logger.Info("--- Starting: HTML Source Code Analysis ---")
+	err := runHTMLAnalysis(state.ctx, state.liveSubdomainsFile, state.htmlFindingsFile, state.logger)
 	if err != nil {
 		return err
 	}
 	if fileExistsAndIsNotEmpty(state.htmlFindingsFile) {
-		slog.Info("HTML analysis completed", "output_file", state.htmlFindingsFile)
+		state.logger.Info("HTML analysis completed", "output_file", state.htmlFindingsFile)
 	} else {
-		slog.Info("HTML analysis completed with no new findings.")
+		state.logger.Info("HTML analysis completed with no new findings.")
 	}
 	return nil
 }
 
 func stepRunFaviconHash(state *reconState) error {
-	slog.Info("--- Starting: Favicon Hash Analysis ---")
-	err := runFaviconHash(state.ctx, state.liveSubdomainsFile, state.faviconFile)
+	state.logger.Info("--- Starting: Favicon Hash Analysis ---")
+	err := runFaviconHash(state.ctx, state.liveSubdomainsFile, state.faviconFile, state.logger)
 	if err != nil {
 		return err
 	}
 	if fileExistsAndIsNotEmpty(state.faviconFile) {
-		slog.Info("Favicon hash analysis completed", "output_file", state.faviconFile)
+		state.logger.Info("Favicon hash analysis completed", "output_file", state.faviconFile)
 	} else {
-		slog.Info("Favicon hash analysis completed with no findings.")
+		state.logger.Info("Favicon hash analysis completed with no findings.")
 	}
 	return nil
 }
 
 func stepRunFuzzing(state *reconState) error {
-	slog.Info("--- Starting: Directory and File Fuzzing (ffuf) ---")
-	err := runFfuf(state.ctx, state.liveSubdomainsFile, state.fuzzWordlist, state.fuzzFile)
+	state.logger.Info("--- Starting: Directory and File Fuzzing (ffuf) ---")
+	err := runFfuf(state.ctx, state.liveSubdomainsFile, state.fuzzWordlist, state.fuzzResultsDir, state.logger)
 	if err != nil {
 		return err
 	}
-	if fileExistsAndIsNotEmpty(state.fuzzFile) {
-		slog.Info("Fuzzing completed", "output_file", state.fuzzFile)
+
+	// Check if the directory was created and is not empty
+	if dirExistsAndIsNotEmpty(state.fuzzResultsDir) {
+		state.logger.Info("Fuzzing completed", "output_dir", state.fuzzResultsDir)
 	} else {
-		slog.Info("Fuzzing completed with no findings.")
+		state.logger.Info("Fuzzing completed with no findings.")
 	}
 	return nil
 }
 
 func stepRunKatana(state *reconState) error {
-	slog.Info("--- Starting: URL Collection (katana) ---")
-	err := runKatana(state.ctx, state.liveSubdomainsFile, state.urlsFile)
+	state.logger.Info("--- Starting: URL Collection (katana) ---")
+	err := runKatana(state.ctx, state.liveSubdomainsFile, state.urlsFile, state.logger)
 	if err == nil {
-		slog.Info("URL Collection completed", "output_file", state.urlsFile)
+		state.logger.Info("URL Collection completed", "output_file", state.urlsFile)
 	}
 	return err
 }
 
 func stepRunJSAnalysis(state *reconState) error {
-	slog.Info("--- Starting: JavaScript Analysis ---")
-	err := runJSAnalysis(state.ctx, state.urlsFile, state.jsFindingsFile)
+	state.logger.Info("--- Starting: JavaScript Analysis ---")
+	err := runJSAnalysis(state.ctx, state.urlsFile, state.jsFindingsFile, state.logger)
 	if err == nil {
-		slog.Info("JavaScript Analysis completed", "output_file", state.jsFindingsFile)
+		state.logger.Info("JavaScript Analysis completed", "output_file", state.jsFindingsFile)
 	}
 	return err
 }
 
-func stepGetWaybackURLs(state *reconState) error {
-	slog.Info("--- Starting: Augmenting with Wayback Machine URLs ---")
-	waybackURLs, err := getWaybackURLs(state.ctx, state.target)
+func stepGetWaybackURLs(state *reconState) error { // This function needs logger too
+	state.logger.Info("--- Starting: Augmenting with Wayback Machine URLs ---")
+	waybackURLs, err := getWaybackURLs(state.ctx, state.target, state.logger)
 	if err != nil {
-		slog.Warn("Failed to get URLs from Wayback Machine, continuing with existing URLs", "error", err)
+		state.logger.Warn("Failed to get URLs from Wayback Machine, continuing with existing URLs", "error", err)
 		return nil
 	}
 	if len(waybackURLs) > 0 {
@@ -329,94 +335,116 @@ func stepGetWaybackURLs(state *reconState) error {
 		if err != nil {
 			return fmt.Errorf("failed to combine Wayback URLs: %w", err)
 		}
-		slog.Info("Successfully added URLs from Wayback Machine", "count", len(waybackURLs))
+		state.logger.Info("Successfully added URLs from Wayback Machine", "count", len(waybackURLs))
 	}
 	return nil
 }
 
 func stepGetCSPDomains(state *reconState) error {
-	slog.Info("--- Starting: CSP Header Subdomain Extraction ---")
-	cspDomains, err := getCSPDomains(state.ctx, state.liveSubdomainsFile, state.target)
-	if err != nil {
-		slog.Warn("Failed to get subdomains from CSP headers", "error", err)
+	state.logger.Info("--- Starting: CSP Header Subdomain Extraction ---")
+	cspDomains, err := getCSPDomains(state.ctx, state.liveSubdomainsFile, state.target, state.logger)
+	if err != nil { // This function needs logger too
+		state.logger.Warn("Failed to get subdomains from CSP headers", "error", err)
 		return nil
 	}
 	if len(cspDomains) > 0 {
-		slog.Info("Found new potential subdomains from CSP headers", "count", len(cspDomains))
+		state.logger.Info("Found new potential subdomains from CSP headers", "count", len(cspDomains))
 		return combineAndDeduplicateURLs(state.subdomainsFile, cspDomains)
 	}
-	slog.Info("CSP Header Subdomain Extraction completed with no new findings.")
+	state.logger.Info("CSP Header Subdomain Extraction completed with no new findings.")
 	return nil
 }
 
 func stepRunVulnerabilityTests(state *reconState) error {
-	slog.Info("--- Starting: Basic Vulnerability Tests (XSS, SQLi) ---")
-	err := runVulnerabilityTests(state.ctx, state.urlsFile, state.vulnerabilityFile)
-	if err != nil {
-		return err
+	state.logger.Info("--- Starting: Basic Vulnerability Tests (XSS, SQLi) ---")
+
+	if !fileExistsAndIsNotEmpty(state.urlsFile) {
+		state.logger.Warn("Input file for vulnerability tests is empty, skipping.", "file", state.urlsFile)
+		return nil
 	}
+
+	state.logger.Info("Executing external httpx command for vulnerability tests.")
+	xssPayloads := `"><script>alert('XSS')</script>,'"--> </style></scRipt><scRipt>alert('XSS')</scRipt>`
+
+	cmd := exec.CommandContext(state.ctx, "httpx",
+		"-l", state.urlsFile,
+		"-o", state.vulnerabilityFile,
+		"-silent",
+		"-no-color",
+		"-threads", fmt.Sprintf("%d", config.Cfg.Engine.MaxParallelTasks),
+		"-timeout", "10",
+		"-follow-redirects",
+		"-random-agent",
+		"-xss", "-xss-payload", xssPayloads,
+		"-sqli",
+		"-unsafe",
+	)
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("httpx (vulnerability) execution failed: %w\nStderr: %s", err, stderr.String())
+	} // This function needs logger too
+
 	if fileExistsAndIsNotEmpty(state.vulnerabilityFile) {
-		slog.Info("Vulnerability testing completed", "output_file", state.vulnerabilityFile)
-	} else {
-		_ = os.Remove(state.vulnerabilityFile)
+		state.logger.Info("Vulnerability testing completed", "output_file", state.vulnerabilityFile)
 	}
 	return nil
 }
 
 func stepRunNucleiScan(state *reconState) error {
-	slog.Info("--- Starting: Vulnerability Scanning (Nuclei) ---")
-	err := runNucleiScan(state.ctx, state.liveSubdomainsFile, state.nucleiScanFile)
+	state.logger.Info("--- Starting: Vulnerability Scanning (Nuclei) ---")
+	err := runNucleiScan(state.ctx, state.liveSubdomainsFile, state.nucleiScanFile, state.logger)
 	if err != nil {
 		return err
 	}
-	if fileExistsAndIsNotEmpty(state.nucleiScanFile) {
-		slog.Info("Nuclei scan completed", "output_file", state.nucleiScanFile)
-	}
+	if fileExistsAndIsNotEmpty(state.nucleiScanFile) { // This function needs logger too
+		state.logger.Info("Nuclei scan completed", "output_file", state.nucleiScanFile)
+	} // This function needs logger too
 	return nil
 }
 
 func stepRunCVESearch(state *reconState) error {
-	slog.Info("--- Starting: Known Vulnerability Search (CVE API) ---")
-	techFile := filepath.Join(state.resultsPath, "httpx_vuln_scan.txt")
-	err := runCVESearch(state.ctx, techFile, state.cveScanFile)
+	state.logger.Info("--- Starting: Known Vulnerability Search (CVE API) ---")
+	err := runCVESearch(state.ctx, state.techFile, state.cveScanFile, state.logger)
 	if err != nil {
 		return err
 	}
-	if fileExistsAndIsNotEmpty(state.cveScanFile) {
-		slog.Info("CVE search completed", "output_file", state.cveScanFile)
-	}
+	if fileExistsAndIsNotEmpty(state.cveScanFile) { // This function needs logger too
+		state.logger.Info("CVE search completed", "output_file", state.cveScanFile)
+	} // This function needs logger too
 	return nil
 }
 
-func stepRunOWASPTests(state *reconState) error {
-	slog.Info("--- Starting: OWASP Top 10 Intrusion Tests (Nuclei) ---")
-	err := runOWASPTests(state.ctx, state.liveSubdomainsFile, state.owaspScanFile)
+func stepRunOWASPTests(state *reconState) error { // This function needs logger too
+	state.logger.Info("--- Starting: OWASP Top 10 Intrusion Tests (Nuclei) ---")
+	err := runOWASPTests(state.ctx, state.liveSubdomainsFile, state.owaspScanFile, state.logger)
 	if err != nil {
 		return err
 	}
 	if fileExistsAndIsNotEmpty(state.owaspScanFile) {
-		slog.Info("OWASP Top 10 tests completed", "output_file", state.owaspScanFile)
-	} else {
-		slog.Info("OWASP Top 10 tests completed with no findings.")
+		state.logger.Info("OWASP Top 10 tests completed", "output_file", state.owaspScanFile)
+	} else { // This function needs logger too
+		state.logger.Info("OWASP Top 10 tests completed with no findings.")
 	}
 	return nil
 }
 
-func stepRunNikto(state *reconState) error {
-	slog.Info("--- Starting: Web Server Scanning (Nikto) ---")
-	err := runNikto(state.ctx, state.liveSubdomainsFile, state.niktoScanFile)
+func stepRunNikto(state *reconState) error { // This function needs logger too
+	state.logger.Info("--- Starting: Web Server Scanning (Nikto) ---")
+	err := runNikto(state.ctx, state.liveSubdomainsFile, state.niktoScanFile, state.logger)
 	if err != nil {
 		return err
 	}
 	if fileExistsAndIsNotEmpty(state.niktoScanFile) {
-		slog.Info("Nikto scan completed", "output_file", state.niktoScanFile)
-	}
+		state.logger.Info("Nikto scan completed", "output_file", state.niktoScanFile)
+	} // This function needs logger too
 	return nil
 }
 
 func stepRunBBot(state *reconState) error {
-	slog.Info("--- Starting: Full-scope Recon (BBot) ---")
-	err := runBBot(state.ctx, state.target, state.bbotScanFile)
+	state.logger.Info("--- Starting: Full-scope Recon (BBot) ---")
+	err := runBBot(state.ctx, state.target, state.bbotScanFile, state.logger)
 	if err != nil {
 		return err
 	}
@@ -428,10 +456,16 @@ func fileExistsAndIsNotEmpty(path string) bool {
 	return !os.IsNotExist(err) && stat.Size() > 0
 }
 
-func runSubfinder(ctx context.Context, target, outputFile string) error {
-	slog.Info("Starting subfinder", "target", target)
-	slog.Info("Executing external subfinder command. Ensure it's installed and configured in your system's PATH.")
-	slog.Info("API keys should be configured in the default provider-config.yaml file.")
+func dirExistsAndIsNotEmpty(path string) bool {
+	entries, err := os.ReadDir(path)
+	// Return true if there's no error and there's at least one entry in the directory.
+	return err == nil && len(entries) > 0
+}
+
+func runSubfinder(ctx context.Context, target, outputFile string, logger *slog.Logger) error {
+	logger.Info("Starting subfinder", "target", target)
+	logger.Info("Executing external subfinder command. Ensure it's installed and configured in your system's PATH.")
+	logger.Info("API keys should be configured in the default provider-config.yaml file.")
 
 	cmd := exec.CommandContext(ctx, "subfinder",
 		"-d", target,
@@ -447,32 +481,37 @@ func runSubfinder(ctx context.Context, target, outputFile string) error {
 
 	err := cmd.Run()
 	if err != nil {
-		slog.Error("Subfinder command failed", "error", err, "stderr", stderr.String())
+		logger.Error("Subfinder command failed", "error", err, "stderr", stderr.String())
 		return fmt.Errorf("subfinder execution failed: %w\nStderr: %s", err, stderr.String())
 	}
 
 	return nil
 }
 
-func runHttpx(ctx context.Context, inputFile, outputFile string) error {
-	slog.Info("Starting httpx to find live subdomains", "input", inputFile)
+func runHttpx(ctx context.Context, inputFile, liveHostsOutputFile, techOutputFile string, logger *slog.Logger) error {
+	logger.Info("Starting httpx to find live subdomains", "input", inputFile)
 
 	if !fileExistsAndIsNotEmpty(inputFile) {
-		slog.Warn("Input file for httpx does not exist or is empty, skipping.", "file", inputFile)
+		logger.Warn("Input file for httpx does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
 
-	slog.Info("Executing external httpx command. Ensure it's installed in your system's PATH.")
+	logger.Info("Executing external httpx command. Ensure it's installed in your system's PATH.")
 
 	cmd := exec.CommandContext(ctx, "httpx",
 		"-l", inputFile,
-		"-o", outputFile,
+		"-o", liveHostsOutputFile,
 		"-threads", "50",
 		"-silent",
 		"-no-color",
 		"-follow-redirects",
 		"-random-agent",
 		"-timeout", "10",
+		// Probe for the top 1000 most common ports
+		"-ports", "top-1000",
+		// Add technology detection and JSON output for it
+		"-tech-detect",
+		"-json", "-o", techOutputFile,
 	)
 
 	var stderr bytes.Buffer
@@ -486,15 +525,15 @@ func runHttpx(ctx context.Context, inputFile, outputFile string) error {
 	return nil
 }
 
-func runKatana(ctx context.Context, inputFile, outputFile string) error {
-	slog.Info("Starting Katana to crawl for URLs", "input", inputFile)
+func runKatana(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
+	logger.Info("Starting Katana to crawl for URLs", "input", inputFile)
 
 	if !fileExistsAndIsNotEmpty(inputFile) {
-		slog.Warn("Input file for Katana does not exist or is empty, skipping.", "file", inputFile)
+		logger.Warn("Input file for Katana does not exist or is empty, skipping.", "file", inputFile)
 		return nil
-	}
+	} // This function needs logger too
 
-	slog.Info("Executing external katana command. Ensure it's installed in your system's PATH.")
+	logger.Info("Executing external katana command. Ensure it's installed in your system's PATH.")
 
 	cmd := exec.CommandContext(ctx, "katana",
 		"-list", inputFile,
@@ -583,8 +622,8 @@ func readLines(filePath string) ([]string, error) {
 	return lines, scanner.Err()
 }
 
-func getWaybackURLs(ctx context.Context, domain string) ([]string, error) {
-	slog.Info("Fetching URLs from Wayback Machine", "domain", domain)
+func getWaybackURLs(ctx context.Context, domain string, logger *slog.Logger) ([]string, error) { // This function needs logger too
+	logger.Info("Fetching URLs from Wayback Machine", "domain", domain)
 	apiURL := fmt.Sprintf("http://web.archive.org/cdx/search/cdx?url=*.%s/*&output=json&fl=original&collapse=urlkey", domain)
 
 	client := &http.Client{Timeout: 90 * time.Second}
@@ -602,7 +641,7 @@ func getWaybackURLs(ctx context.Context, domain string) ([]string, error) {
 		if err == nil {
 			break
 		}
-		slog.Warn("Wayback Machine request failed, retrying...", "attempt", i+1, "error", err)
+		logger.Warn("Wayback Machine request failed, retrying...", "attempt", i+1, "error", err)
 		time.Sleep(2 * time.Second)
 	}
 
@@ -621,13 +660,13 @@ func getWaybackURLs(ctx context.Context, domain string) ([]string, error) {
 	}
 
 	if len(body) == 0 {
-		slog.Info("Wayback Machine returned an empty response", "domain", domain)
+		logger.Info("Wayback Machine returned an empty response", "domain", domain)
 		return nil, nil
 	}
 
 	var results [][]string
 	if err := json.Unmarshal(body, &results); err != nil {
-		slog.Warn("Could not unmarshal Wayback Machine JSON response", "error", err, "response", string(body))
+		logger.Warn("Could not unmarshal Wayback Machine JSON response", "error", err, "response", string(body))
 		return nil, nil
 	}
 
@@ -640,7 +679,7 @@ func getWaybackURLs(ctx context.Context, domain string) ([]string, error) {
 		}
 	}
 
-	slog.Info("Found URLs in Wayback Machine", "count", len(urls), "domain", domain)
+	logger.Info("Found URLs in Wayback Machine", "count", len(urls), "domain", domain)
 	return urls, nil
 }
 
@@ -657,8 +696,8 @@ type URL struct {
 	Loc string `xml:"loc"`
 }
 
-func parseSitemap(ctx context.Context, domain string) ([]string, error) {
-	slog.Info("Attempting to parse sitemap", "domain", domain)
+func parseSitemap(ctx context.Context, domain string, logger *slog.Logger) ([]string, error) { // This function needs logger too
+	logger.Info("Attempting to parse sitemap", "domain", domain)
 	var foundURLs []string
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -668,27 +707,27 @@ func parseSitemap(ctx context.Context, domain string) ([]string, error) {
 		defer wg.Done()
 		req, err := http.NewRequestWithContext(ctx, "GET", sitemapURL, nil)
 		if err != nil {
-			slog.Warn("Failed to create sitemap request", "url", sitemapURL, "error", err)
+			logger.Warn("Failed to create sitemap request", "url", sitemapURL, "error", err)
 			return
 		}
 
 		client := &http.Client{Timeout: 20 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
-			slog.Warn("Failed to fetch sitemap", "url", sitemapURL, "error", err)
+			logger.Warn("Failed to fetch sitemap", "url", sitemapURL, "error", err)
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return
+			return // Silently ignore non-200, it's common for sitemaps not to exist
 		}
 
 		var reader io.Reader = resp.Body
 		if strings.HasSuffix(sitemapURL, ".gz") {
 			gzReader, err := gzip.NewReader(resp.Body)
 			if err != nil {
-				slog.Warn("Failed to create gzip reader for sitemap", "url", sitemapURL, "error", err)
+				logger.Warn("Failed to create gzip reader for sitemap", "url", sitemapURL, "error", err)
 				return
 			}
 			defer gzReader.Close()
@@ -697,7 +736,7 @@ func parseSitemap(ctx context.Context, domain string) ([]string, error) {
 
 		body, err := io.ReadAll(reader)
 		if err != nil {
-			slog.Warn("Failed to read sitemap body", "url", sitemapURL, "error", err)
+			logger.Warn("Failed to read sitemap body", "url", sitemapURL, "error", err)
 			return
 		}
 
@@ -740,11 +779,11 @@ func parseSitemap(ctx context.Context, domain string) ([]string, error) {
 	}
 
 	wg.Wait()
-	slog.Info("Sitemap parsing finished", "urls_found", len(foundURLs))
+	logger.Info("Sitemap parsing finished", "urls_found", len(foundURLs))
 	return foundURLs, nil
 }
 
-func isMetadataTarget(urlStr string) bool {
+func isMetadataTarget(urlStr string) bool { // This function needs logger too
 	lowerURL := strings.ToLower(urlStr)
 	extensions := []string{".pdf", ".jpg", ".jpeg", ".png", ".gif"}
 	for _, ext := range extensions {
@@ -754,26 +793,26 @@ func isMetadataTarget(urlStr string) bool {
 	}
 	return false
 }
-
-func analyzeFileMetadata(wg *sync.WaitGroup, urlStr string, writer *bufio.Writer, mu *sync.Mutex) {
+// This function needs logger too
+func analyzeFileMetadata(wg *sync.WaitGroup, urlStr string, writer *bufio.Writer, mu *sync.Mutex, logger *slog.Logger) {
 	defer wg.Done()
-	slog.Debug("Analyzing file for metadata", "url", urlStr)
+	logger.Debug("Analyzing file for metadata", "url", urlStr)
 
 	resp, err := http.Get(urlStr)
 	if err != nil {
-		slog.Error("Failed to download file for metadata analysis", "url", urlStr, "error", err)
+		logger.Error("Failed to download file for metadata analysis", "url", urlStr, "error", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("Failed to download file for metadata, non-200 status", "url", urlStr, "status", resp.StatusCode)
+		logger.Warn("Failed to download file for metadata, non-200 status", "url", urlStr, "status", resp.StatusCode)
 		return
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		slog.Error("Failed to read file body for metadata analysis", "url", urlStr, "error", err)
+		logger.Error("Failed to read file body for metadata analysis", "url", urlStr, "error", err)
 		return
 	}
 	reader := bytes.NewReader(body)
@@ -823,7 +862,7 @@ func analyzeFileMetadata(wg *sync.WaitGroup, urlStr string, writer *bufio.Writer
 	if len(findings) > 0 {
 		mu.Lock()
 		defer mu.Unlock()
-		slog.Info("Found metadata in file", "url", urlStr)
+		logger.Info("Found metadata in file", "url", urlStr)
 		_, _ = writer.WriteString(fmt.Sprintf("[METADATA] File: %s\n", urlStr))
 		for _, finding := range findings {
 			_, _ = writer.WriteString(finding + "\n")
@@ -858,7 +897,7 @@ func extractInterestingExif(x *goexif.Exif) []string {
 	return nil
 }
 
-func getJSURLsFromFile(inputFile string) ([]string, error) {
+func getJSURLsFromFile(inputFile string) ([]string, error) { // This function needs logger too
 	file, err := os.Open(inputFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open input file %s: %w", inputFile, err)
@@ -869,8 +908,14 @@ func getJSURLsFromFile(inputFile string) ([]string, error) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.HasSuffix(line, ".js") {
-			jsURLs = append(jsURLs, line)
+		// Check if the URL contains .js before a query string, or ends with .js
+		if strings.Contains(line, ".js?") || strings.HasSuffix(line, ".js") {
+			// Clean the URL by removing query parameters
+			if u, err := url.Parse(line); err == nil {
+				u.RawQuery = ""
+				u.Fragment = ""
+				jsURLs = append(jsURLs, u.String())
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -879,7 +924,7 @@ func getJSURLsFromFile(inputFile string) ([]string, error) {
 	return jsURLs, nil
 }
 
-func downloadContent(urlStr string) ([]byte, error) {
+func downloadContent(urlStr string) ([]byte, error) { // This function needs logger too
 	resp, err := http.Get(urlStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download from %s: %w", urlStr, err)
@@ -893,15 +938,15 @@ func downloadContent(urlStr string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-// beautifyJS executa a ferramenta externa 'jsbeautifier-go' para formatar o código JS.
-func beautifyJS(jsContent string, urlStr string) string {
+// beautifyJS executa a ferramenta externa 'jsbeautifier-go' para formatar o código JS. // This function needs logger too
+func beautifyJS(jsContent string, urlStr string, logger *slog.Logger) string {
 	cmd := exec.Command("jsbeautifier-go")
 	cmd.Stdin = strings.NewReader(jsContent)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 
 	if err := cmd.Run(); err != nil {
-		slog.Warn("Failed to run 'jsbeautifier-go'. Analyzing original content.", "url", urlStr, "error", err, "help", "Ensure 'jsbeautifier-go' is installed: go install github.com/ditashi/jsbeautifier-go@latest")
+		logger.Warn("Failed to run 'jsbeautifier-go'. Analyzing original content.", "url", urlStr, "error", err, "help", "Ensure 'jsbeautifier-go' is installed: go install github.com/ditashi/jsbeautifier-go@latest") // This function needs logger too
 		return jsContent // Retorna o conteúdo original em caso de falha
 	}
 	return out.String()
@@ -952,22 +997,22 @@ type URLFindings struct {
 	Endpoints []Finding
 }
 
-func processSingleJSURL(ctx context.Context, jsURL string, writer *bufio.Writer, mu *sync.Mutex) {
-	slog.Debug("Processing JS file", "url", jsURL)
+func processSingleJSURL(ctx context.Context, jsURL string, writer *bufio.Writer, mu *sync.Mutex, logger *slog.Logger) { // This function needs logger too
+	logger.Debug("Processing JS file", "url", jsURL)
 
 	body, err := downloadContent(jsURL)
 	if err != nil {
-		slog.Error("Failed to process JS file", "url", jsURL, "error", err)
+		logger.Error("Failed to process JS file", "url", jsURL, "error", err)
 		return
 	}
 
 	jsContent := string(body)
-	beautifiedContent := beautifyJS(jsContent, jsURL)
+	beautifiedContent := beautifyJS(jsContent, jsURL, logger)
 
 	jsSecrets, jsEndpoints := analyzeContentForPatterns(beautifiedContent)
 
 	if len(jsSecrets) > 0 || len(jsEndpoints) > 0 {
-		slog.Info("Found patterns in JS file", "url", jsURL)
+		logger.Info("Found patterns in JS file", "url", jsURL)
 		findings := URLFindings{
 			URL:       jsURL,
 			Secrets:   jsSecrets,
@@ -976,7 +1021,7 @@ func processSingleJSURL(ctx context.Context, jsURL string, writer *bufio.Writer,
 		writeFindings(writer, mu, "JS", findings)
 	}
 
-	findAndAnalyzeSourcemap(jsURL, beautifiedContent, writer, mu)
+	findAndAnalyzeSourcemap(jsURL, beautifiedContent, writer, mu, logger)
 }
 
 func writeFindings(writer *bufio.Writer, mu *sync.Mutex, sourceType string, findings URLFindings) {
@@ -1005,19 +1050,19 @@ func writeFindings(writer *bufio.Writer, mu *sync.Mutex, sourceType string, find
 	_, _ = writer.WriteString("\n")
 }
 
-func runJSAnalysis(ctx context.Context, inputFile, outputFile string) error {
-	slog.Info("Starting JavaScript analysis", "input", inputFile)
+func runJSAnalysis(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
+	logger.Info("Starting JavaScript analysis", "input", inputFile)
 	if !fileExistsAndIsNotEmpty(inputFile) {
-		slog.Warn("Input file for JS analysis does not exist or is empty, skipping.", "file", inputFile)
+		logger.Warn("Input file for JS analysis does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
 
-	jsURLs, err := getJSURLsFromFile(inputFile)
+	jsURLs, err := getJSURLsFromFile(inputFile) // This function needs logger too
 	if err != nil {
 		return err
 	}
 	if len(jsURLs) == 0 {
-		slog.Warn("No JavaScript URLs found in input file, skipping JS analysis.", "file", inputFile)
+		logger.Warn("No JavaScript URLs found in input file, skipping JS analysis.", "file", inputFile)
 		return nil
 	}
 
@@ -1036,14 +1081,14 @@ func runJSAnalysis(ctx context.Context, inputFile, outputFile string) error {
 	for _, jsURL := range jsURLs {
 		select {
 		case <-ctx.Done():
-			slog.Info("JS analysis cancelled by context", "error", ctx.Err())
+			logger.Info("JS analysis cancelled by context", "error", ctx.Err())
 			return ctx.Err()
 		case concurrencyLimit <- struct{}{}:
 			wg.Add(1)
 			go func(urlStr string) {
 				defer wg.Done()
 				defer func() { <-concurrencyLimit }()
-				processSingleJSURL(ctx, urlStr, writer, &muWriter)
+				processSingleJSURL(ctx, urlStr, writer, &muWriter, logger) // This function needs logger too
 			}(jsURL)
 		}
 	}
@@ -1051,14 +1096,14 @@ func runJSAnalysis(ctx context.Context, inputFile, outputFile string) error {
 	return nil
 }
 
-func findAndAnalyzeSourcemap(jsURL, jsContent string, writer *bufio.Writer, mu *sync.Mutex) {
+func findAndAnalyzeSourcemap(jsURL, jsContent string, writer *bufio.Writer, mu *sync.Mutex, logger *slog.Logger) { // This function needs logger too
 	matches := sourceMappingURLRegex.FindStringSubmatch(jsContent)
 	if len(matches) < 2 {
 		return
 	}
 
 	sourceMapURL := strings.TrimSpace(matches[1])
-	slog.Debug("Found sourcemap reference", "js_url", jsURL, "sourcemap_url", sourceMapURL)
+	logger.Debug("Found sourcemap reference", "js_url", jsURL, "sourcemap_url", sourceMapURL)
 
 	var sourceMapContent []byte
 	var err error
@@ -1071,19 +1116,19 @@ func findAndAnalyzeSourcemap(jsURL, jsContent string, writer *bufio.Writer, mu *
 	} else {
 		parsedJSURL, _ := url.Parse(jsURL)
 		absoluteSourceMapURL := parsedJSURL.ResolveReference(&url.URL{Path: sourceMapURL}).String()
-		slog.Debug("Downloading sourcemap", "url", absoluteSourceMapURL)
+		logger.Debug("Downloading sourcemap", "url", absoluteSourceMapURL)
 		sourceMapContent, err = downloadContent(absoluteSourceMapURL)
 	}
 
 	if err != nil {
-		slog.Warn("Failed to retrieve or decode sourcemap", "js_url", jsURL, "error", err)
+		logger.Warn("Failed to retrieve or decode sourcemap", "js_url", jsURL, "error", err)
 		return
 	}
 
-	smSecrets, smEndpoints := analyzeSourceMap(jsURL, sourceMapContent)
+	smSecrets, smEndpoints := analyzeSourceMap(jsURL, sourceMapContent, logger)
 
 	if len(smSecrets) > 0 || len(smEndpoints) > 0 {
-		slog.Info("Found patterns in sourcemap", "js_url", jsURL)
+		logger.Info("Found patterns in sourcemap", "js_url", jsURL)
 		findings := URLFindings{
 			URL:       jsURL,
 			Secrets:   smSecrets,
@@ -1098,10 +1143,10 @@ type SourceMap struct {
 	SourcesContent []string `json:"sourcesContent"`
 }
 
-func analyzeSourceMap(jsURL string, content []byte) (allSecrets []Finding, allEndpoints []Finding) {
+func analyzeSourceMap(jsURL string, content []byte, logger *slog.Logger) (allSecrets []Finding, allEndpoints []Finding) { // This function needs logger too
 	var sm SourceMap
 	if err := json.Unmarshal(content, &sm); err != nil {
-		slog.Warn("Failed to unmarshal sourcemap", "js_url", jsURL, "error", err)
+		logger.Warn("Failed to unmarshal sourcemap", "js_url", jsURL, "error", err)
 		return nil, nil
 	}
 
@@ -1109,7 +1154,7 @@ func analyzeSourceMap(jsURL string, content []byte) (allSecrets []Finding, allEn
 		return nil, nil
 	}
 
-	slog.Info("Analyzing content from sourcemap", "js_url", jsURL, "source_files", len(sm.SourcesContent))
+	logger.Info("Analyzing content from sourcemap", "js_url", jsURL, "source_files", len(sm.SourcesContent))
 	for _, sourceContent := range sm.SourcesContent {
 		secrets, endpoints := analyzeContentForPatterns(sourceContent)
 		if len(secrets) > 0 {
@@ -1122,48 +1167,10 @@ func analyzeSourceMap(jsURL string, content []byte) (allSecrets []Finding, allEn
 	return allSecrets, allEndpoints
 }
 
-func runVulnerabilityTests(ctx context.Context, inputFile, outputFile string) error {
-	slog.Info("Starting basic vulnerability tests (XSS, SQLi)", "input", inputFile)
-
-	if !fileExistsAndIsNotEmpty(inputFile) {
-		slog.Warn("Input file for vulnerability tests is empty, skipping.", "file", inputFile)
-		return nil
-	}
-
-	slog.Info("Executing external httpx command for vulnerability tests. Ensure it's installed in your system's PATH.")
-
-	xssPayloads := `"><script>alert('XSS')</script>,'"--> </style></scRipt><scRipt>alert('XSS')</scRipt>`
-
-	cmd := exec.CommandContext(ctx, "httpx",
-		"-l", inputFile,
-		"-o", filepath.Join(filepath.Dir(outputFile), "httpx_vuln_scan.txt"),
-		"-silent",
-		"-no-color",
-		"-threads", fmt.Sprintf("%d", config.Cfg.Engine.MaxParallelTasks),
-		"-timeout", "10",
-		"-follow-redirects",
-		"-random-agent",
-		"-xss",
-		"-xss-payload", xssPayloads,
-		"-sqli",
-		"-unsafe",
-	)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err != nil {
-		return fmt.Errorf("httpx (vulnerability) execution failed: %w\nStderr: %s", err, stderr.String())
-	}
-
-	return nil
-}
-
-func runDNSValidator(ctx context.Context, outputFile string) error {
-	slog.Info("Validating public DNS resolvers with dnsvalidator. This may take a moment...")
+func runDNSValidator(ctx context.Context, outputFile string, logger *slog.Logger) error {
+	logger.Info("Validating public DNS resolvers with dnsvalidator. This may take a moment...")
 	resolversListURL := "https://public-dns.info/nameservers.txt"
-
+	
 	cmd := exec.CommandContext(ctx, "dnsvalidator",
 		"-tL", resolversListURL,
 		"-threads", "100",
@@ -1175,27 +1182,27 @@ func runDNSValidator(ctx context.Context, outputFile string) error {
 
 	err := cmd.Run()
 	if err != nil {
-		return fmt.Errorf("dnsvalidator execution failed: %w\nStderr: %s", err, stderr.String())
+		return fmt.Errorf("dnsvalidator execution failed: %w\nStderr: %s", err, stderr.String()) // This function needs logger too
 	}
 
 	if !fileExistsAndIsNotEmpty(outputFile) {
 		return fmt.Errorf("dnsvalidator ran but did not produce a resolver list")
-	}
+	} // This function needs logger too
 
 	return nil
 }
 
-func runShuffleDNS(ctx context.Context, domain, wordlist, resolversFile, subdomainsFile string) ([]string, error) {
+func runShuffleDNS(ctx context.Context, domain, wordlist, resolversFile, subdomainsFile string, logger *slog.Logger) ([]string, error) {
 	if !fileExistsAndIsNotEmpty(resolversFile) {
-		slog.Warn("Resolvers file for shuffledns does not exist or is empty, skipping.", "file", resolversFile)
+		logger.Warn("Resolvers file for shuffledns does not exist or is empty, skipping.", "file", resolversFile)
 		return nil, nil
 	}
 	if (wordlist == "" || !fileExistsAndIsNotEmpty(wordlist)) && !fileExistsAndIsNotEmpty(subdomainsFile) {
-		slog.Warn("Both subdomain wordlist and input subdomains file are missing, skipping shuffledns.", "wordlist", wordlist, "subdomains_file", subdomainsFile)
+		logger.Warn("Both subdomain wordlist and input subdomains file are missing, skipping shuffledns.", "wordlist", wordlist, "subdomains_file", subdomainsFile)
 		return nil, nil
 	}
 
-	slog.Info("Executing external shuffledns command.", "domain", domain)
+	logger.Info("Executing external shuffledns command.", "domain", domain)
 
 	cmd := exec.CommandContext(ctx, "shuffledns",
 		"-d", domain,
@@ -1233,13 +1240,13 @@ func runShuffleDNS(ctx context.Context, domain, wordlist, resolversFile, subdoma
 	return foundSubdomains, nil
 }
 
-func runNucleiScan(ctx context.Context, inputFile, outputFile string) error {
+func runNucleiScan(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
 	if !fileExistsAndIsNotEmpty(inputFile) {
-		slog.Warn("Input file for Nuclei does not exist or is empty, skipping.", "file", inputFile)
+		logger.Warn("Input file for Nuclei does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
-
-	slog.Info("Executing external nuclei command. Ensure it's installed and templates are updated.")
+	
+	logger.Info("Executing external nuclei command. Ensure it's installed and templates are updated.")
 
 	args := []string{
 		"-l", inputFile,
@@ -1253,7 +1260,7 @@ func runNucleiScan(ctx context.Context, inputFile, outputFile string) error {
 	}
 
 	if len(config.Cfg.Recon.Nuclei.Templates) > 0 {
-		slog.Info("Using custom Nuclei templates from config", "templates", config.Cfg.Recon.Nuclei.Templates)
+		logger.Info("Using custom Nuclei templates from config", "templates", config.Cfg.Recon.Nuclei.Templates)
 		args = append(args, "-t", strings.Join(config.Cfg.Recon.Nuclei.Templates, ","))
 	}
 
@@ -1270,17 +1277,17 @@ func runNucleiScan(ctx context.Context, inputFile, outputFile string) error {
 	return nil
 }
 
-func runOWASPTests(ctx context.Context, inputFile, outputFile string) error {
+func runOWASPTests(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
 	if !fileExistsAndIsNotEmpty(inputFile) {
-		slog.Warn("Input file for OWASP tests does not exist or is empty, skipping.", "file", inputFile)
+		logger.Warn("Input file for OWASP tests does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
-
-	slog.Info("Executing external nuclei command for OWASP Top 10 tests. Ensure it's installed and templates are updated.")
+	
+	logger.Info("Executing external nuclei command for OWASP Top 10 tests. Ensure it's installed and templates are updated.")
 
 	owaspTemplates := config.Cfg.Recon.Nuclei.OWASPTemplates
 	if len(owaspTemplates) == 0 {
-		slog.Warn("No specific OWASP Top 10 templates configured. Using a default set.", "config_path", "config.Cfg.Recon.Nuclei.OWASPTemplates")
+		logger.Warn("No specific OWASP Top 10 templates configured. Using a default set.", "config_path", "config.Cfg.Recon.Nuclei.OWASPTemplates")
 		owaspTemplates = []string{
 			"http/vulnerabilities/access-control/",
 			"http/vulnerabilities/command-injection/",
@@ -1299,15 +1306,15 @@ func runOWASPTests(ctx context.Context, inputFile, outputFile string) error {
 		}
 	}
 
-	return executeNucleiCommand(ctx, inputFile, outputFile, owaspTemplates)
+	return executeNucleiCommand(ctx, inputFile, outputFile, owaspTemplates, logger)
 }
 
-func executeNucleiCommand(ctx context.Context, inputFile, outputFile string, templates []string) error {
+func executeNucleiCommand(ctx context.Context, inputFile, outputFile string, templates []string, logger *slog.Logger) error {
 	if !fileExistsAndIsNotEmpty(inputFile) || len(templates) == 0 {
 		return nil
 	}
 
-	slog.Debug("Running Nuclei command", "input", inputFile, "output", outputFile, "templates", templates)
+	logger.Debug("Running Nuclei command", "input", inputFile, "output", outputFile, "templates", templates)
 
 	args := []string{
 		"-l", inputFile,
@@ -1333,20 +1340,20 @@ func executeNucleiCommand(ctx context.Context, inputFile, outputFile string, tem
 	return nil
 }
 
-func runNikto(ctx context.Context, inputFile, outputFile string) error {
+func runNikto(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
 	if !fileExistsAndIsNotEmpty(inputFile) {
-		slog.Warn("Input file for Nikto does not exist or is empty, skipping.", "file", inputFile)
+		logger.Warn("Input file for Nikto does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
 
-	slog.Info("Executing external nikto command in parallel. Ensure it's installed in your system's PATH.")
+	logger.Info("Executing external nikto command in parallel. Ensure it's installed in your system's PATH.")
 
 	hosts, err := readLines(inputFile)
 	if err != nil {
 		return fmt.Errorf("failed to read hosts from input file for Nikto: %w", err)
 	}
 	if len(hosts) == 0 {
-		slog.Info("No hosts found in input file for Nikto, skipping scan.", "file", inputFile)
+		logger.Info("No hosts found in input file for Nikto, skipping scan.", "file", inputFile)
 		return nil
 	}
 
@@ -1368,24 +1375,45 @@ func runNikto(ctx context.Context, inputFile, outputFile string) error {
 
 		select {
 		case <-ctx.Done():
-			slog.Info("Nikto scan cancelled by context", "error", ctx.Err())
+			logger.Info("Nikto scan cancelled by context", "error", ctx.Err())
 			return ctx.Err()
 		case concurrencyLimit <- struct{}{}:
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				defer func() { <-concurrencyLimit }()
+				
+				logger.Debug("Running Nikto scan", "host", host)
 
-				slog.Debug("Running Nikto scan", "host", host)
-				cmd := exec.CommandContext(ctx, "nikto", "-h", host, "-Format", "txt")
+				parsedURL, err := url.Parse(host)
+				if err != nil {
+					logger.Warn("Failed to parse host URL for Nikto, skipping", "host", host, "error", err)
+					return
+				}
+
+				args := []string{
+					"-h", parsedURL.Hostname(),
+					"-Format", "txt",
+					"-Tuning", "1", // Focus on interesting findings
+				}
+				if parsedURL.Scheme == "https" {
+					args = append(args, "-ssl")
+				}
+				if port := parsedURL.Port(); port != "" {
+					args = append(args, "-p", port)
+				}
+
+				cmd := exec.CommandContext(ctx, "nikto", args...)
 
 				var stdoutBuf, stderrBuf bytes.Buffer
 				cmd.Stdout = &stdoutBuf
 				cmd.Stderr = &stderrBuf
 
-				err := cmd.Run()
+				err = cmd.Run()
 				if err != nil {
-					slog.Warn("Nikto scan for host failed", "host", host, "error", err, "stderr", stderrBuf.String())
+					// Nikto often exits with code 1 for non-fatal errors (e.g., connection issues).
+					// We log it but don't treat it as a hard failure to allow results to be saved.
+					logger.Warn("Nikto scan for host completed with an error", "host", host, "error", err, "stderr", stderrBuf.String())
 				}
 
 				mu.Lock()
@@ -1408,20 +1436,20 @@ func runNikto(ctx context.Context, inputFile, outputFile string) error {
 	return nil
 }
 
-func runBBot(ctx context.Context, target, outputFile string) error {
-	slog.Info("Executing external bbot command. Ensure it's installed and configured.")
+func runBBot(ctx context.Context, target, outputFile string, logger *slog.Logger) error {
+	logger.Info("Executing external bbot command. Ensure it's installed and configured.")
 
 	profile := "recon-light"
 	if config.Cfg.Recon.BBot.Profile != "" {
 		profile = config.Cfg.Recon.BBot.Profile
 	}
-	slog.Info("Using bbot profile", "profile", profile)
+	logger.Info("Using bbot profile", "profile", profile)
 
 	cmd := exec.CommandContext(ctx, "bbot", "-t", target, "-f", profile, "-o", outputFile, "-y")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("bbot execution failed: %w", err)
 	}
-	slog.Info("BBot scan completed", "output_file", outputFile)
+	logger.Info("BBot scan completed", "output_file", outputFile)
 	return nil
 }
 
@@ -1432,12 +1460,12 @@ type FaviconResult struct {
 	ShodanSearch string `json:"shodan_search"`
 }
 
-func runFaviconHash(ctx context.Context, inputFile, outputFile string) error {
+func runFaviconHash(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
 	if !fileExistsAndIsNotEmpty(inputFile) {
-		slog.Warn("Input file for favicon analysis does not exist or is empty, skipping.", "file", inputFile)
+		logger.Warn("Input file for favicon analysis does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
-
+	
 	hosts, err := readLines(inputFile)
 	if err != nil {
 		return fmt.Errorf("failed to read hosts for favicon analysis: %w", err)
@@ -1456,7 +1484,7 @@ func runFaviconHash(ctx context.Context, inputFile, outputFile string) error {
 			defer wg.Done()
 			defer func() { <-concurrencyLimit }()
 
-			faviconURLs := findFaviconURLs(ctx, h)
+			faviconURLs := findFaviconURLs(ctx, h, logger)
 			if len(faviconURLs) == 0 {
 				return
 			}
@@ -1510,7 +1538,7 @@ func runFaviconHash(ctx context.Context, inputFile, outputFile string) error {
 	return nil
 }
 
-func findFaviconURLs(ctx context.Context, hostURL string) []string {
+func findFaviconURLs(ctx context.Context, hostURL string, logger *slog.Logger) []string {
 	var foundURLs []string
 
 	defaultFaviconURL, _ := url.Parse(hostURL)
@@ -1523,7 +1551,7 @@ func findFaviconURLs(ctx context.Context, hostURL string) []string {
 	)
 	c.SetClient(&http.Client{Timeout: 10 * time.Second})
 
-	c.OnHTML("link[rel~='icon']", func(e *colly.HTMLElement) {
+	c.OnHTML("link[rel~='icon']", func(e *colly.HTMLElement) { // This function needs logger too
 		href := e.Attr("href")
 		absoluteURL := e.Request.AbsoluteURL(href)
 		foundURLs = append(foundURLs, absoluteURL)
@@ -1569,12 +1597,12 @@ type HttpxTechInfo struct {
 	Tech []string `json:"tech"`
 }
 
-func runCVESearch(ctx context.Context, techFile, outputFile string) error {
+func runCVESearch(ctx context.Context, techFile, outputFile string, logger *slog.Logger) error {
 	if !fileExistsAndIsNotEmpty(techFile) {
-		slog.Warn("Technology detection file does not exist or is empty, skipping CVE search.", "file", techFile)
+		logger.Warn("Technology detection file does not exist or is empty, skipping CVE search.", "file", techFile)
 		return nil
 	}
-
+	
 	file, err := os.Open(techFile)
 	if err != nil {
 		return fmt.Errorf("failed to open tech file: %w", err)
@@ -1596,7 +1624,7 @@ func runCVESearch(ctx context.Context, techFile, outputFile string) error {
 	}
 
 	if len(techMap) == 0 {
-		slog.Info("No technologies detected, skipping CVE search.")
+		logger.Info("No technologies detected, skipping CVE search.")
 		return nil
 	}
 
@@ -1609,7 +1637,7 @@ func runCVESearch(ctx context.Context, techFile, outputFile string) error {
 		wg.Add(1)
 		go func(t string, u []string) {
 			defer wg.Done()
-			slog.Debug("Searching CVEs for technology", "tech", t)
+			logger.Debug("Searching CVEs for technology", "tech", t)
 
 			time.Sleep(1 * time.Second)
 
@@ -1621,19 +1649,19 @@ func runCVESearch(ctx context.Context, techFile, outputFile string) error {
 
 			resp, err := client.Do(req)
 			if err != nil {
-				slog.Warn("Failed to query NVD API", "tech", t, "error", err)
+				logger.Warn("Failed to query NVD API", "tech", t, "error", err)
 				return
 			}
 			defer resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
-				slog.Warn("NVD API returned non-200 status", "tech", t, "status", resp.StatusCode)
+				logger.Warn("NVD API returned non-200 status", "tech", t, "status", resp.StatusCode)
 				return
 			}
 
 			var nvdResp NVDResponse
 			if err := json.NewDecoder(resp.Body).Decode(&nvdResp); err != nil {
-				slog.Warn("Failed to decode NVD API response", "tech", t, "error", err)
+				logger.Warn("Failed to decode NVD API response", "tech", t, "error", err)
 				return
 			}
 
@@ -1670,25 +1698,27 @@ func runCVESearch(ctx context.Context, techFile, outputFile string) error {
 	return nil
 }
 
-func runFfuf(ctx context.Context, inputFile, wordlist, outputFile string) error {
+func runFfuf(ctx context.Context, inputFile, wordlist, outputDir string, logger *slog.Logger) error {
 	if !fileExistsAndIsNotEmpty(inputFile) {
-		slog.Warn("Input file for ffuf does not exist or is empty, skipping.", "file", inputFile)
+		logger.Warn("Input file for ffuf does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
 	if wordlist == "" || !fileExistsAndIsNotEmpty(wordlist) {
-		slog.Warn("Fuzzing wordlist not configured or file not found, skipping ffuf.", "file", wordlist)
-		return nil
+		logger.Warn("Fuzzing wordlist not configured or file not found, skipping ffuf.", "file", wordlist)
+		return nil // This function needs logger too
 	}
 
-	slog.Info("Executing external ffuf command. Ensure it's installed in your system's PATH.")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create ffuf output directory: %w", err)
+	}
+
+	logger.Info("Executing external ffuf command. Ensure it's installed in your system's PATH.")
 
 	hosts, err := readLines(inputFile)
 	if err != nil {
 		return fmt.Errorf("failed to read hosts for ffuf: %w", err)
 	}
 
-	var allResults []interface{}
-	var mu sync.Mutex
 	var wg sync.WaitGroup
 	concurrencyLimit := make(chan struct{}, config.Cfg.Engine.MaxParallelTasks)
 
@@ -1699,44 +1729,38 @@ func runFfuf(ctx context.Context, inputFile, wordlist, outputFile string) error 
 			defer wg.Done()
 			defer func() { <-concurrencyLimit }()
 
-			slog.Debug("Running ffuf scan", "host", h)
-			cmd := exec.CommandContext(ctx, "ffuf", "-w", wordlist, "-u", h+"/FUZZ", "-o", "json", "-silent")
-			output, err := cmd.Output()
-			if err != nil {
-				return
-			}
+			sanitizedHost := sanitizeTargetForPath(h)
+			hostOutputFile := filepath.Join(outputDir, fmt.Sprintf("%s.json", sanitizedHost))
 
-			var result struct {
-				Results []interface{} `json:"results"`
-			}
-			if json.Unmarshal(output, &result) == nil && len(result.Results) > 0 {
-				mu.Lock()
-				allResults = append(allResults, result.Results...)
-				mu.Unlock()
-			}
+			logger.Debug("Running ffuf scan", "host", h)
+			cmd := exec.CommandContext(ctx, "ffuf",
+				"-w", wordlist,
+				"-u", h+"/FUZZ",
+				"-o", hostOutputFile,
+				"-of", "json",
+				"-silent",
+			)
+
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			if err != nil {
+				logger.Warn("ffuf scan for host failed", "host", h, "error", err, "stderr", stderr.String())
+			} // This function needs logger too
 		}(host)
 	}
 
 	wg.Wait()
 
-	if len(allResults) > 0 {
-		finalOutput := map[string]interface{}{"results": allResults}
-		fileData, err := json.MarshalIndent(finalOutput, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal ffuf results: %w", err)
-		}
-		return os.WriteFile(outputFile, fileData, 0644)
-	}
-
 	return nil
 }
 
-func getCSPDomains(ctx context.Context, liveSubdomainsFile, mainTarget string) ([]string, error) {
+func getCSPDomains(ctx context.Context, liveSubdomainsFile, mainTarget string, logger *slog.Logger) ([]string, error) {
 	if !fileExistsAndIsNotEmpty(liveSubdomainsFile) {
-		slog.Warn("Live subdomains file for CSP analysis does not exist or is empty, skipping.", "file", liveSubdomainsFile)
+		logger.Warn("Live subdomains file for CSP analysis does not exist or is empty, skipping.", "file", liveSubdomainsFile)
 		return nil, nil
 	}
-
+	
 	file, err := os.Open(liveSubdomainsFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open live subdomains file: %w", err)
@@ -1802,12 +1826,12 @@ func getCSPDomains(ctx context.Context, liveSubdomainsFile, mainTarget string) (
 	return result, scanner.Err()
 }
 
-func runHTMLAnalysis(ctx context.Context, inputFile, outputFile string) error {
+func runHTMLAnalysis(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
 	if !fileExistsAndIsNotEmpty(inputFile) {
-		slog.Warn("Input file for HTML analysis does not exist or is empty, skipping.", "file", inputFile)
+		logger.Warn("Input file for HTML analysis does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
-
+	
 	hosts, err := readLines(inputFile)
 	if err != nil {
 		return fmt.Errorf("failed to read hosts for HTML analysis: %w", err)
@@ -1833,8 +1857,8 @@ func runHTMLAnalysis(ctx context.Context, inputFile, outputFile string) error {
 		Parallelism: config.Cfg.Engine.MaxParallelTasks,
 	})
 
-	c.OnResponse(func(r *colly.Response) {
-		saveAndAnalyzeHTML(r, writer, &mu)
+	c.OnResponse(func(r *colly.Response) { // This function needs logger too
+		saveAndAnalyzeHTML(r, writer, &mu, logger)
 	})
 
 	for _, host := range hosts {
@@ -1845,21 +1869,21 @@ func runHTMLAnalysis(ctx context.Context, inputFile, outputFile string) error {
 	return nil
 }
 
-func saveAndAnalyzeHTML(r *colly.Response, secretsWriter *bufio.Writer, mu *sync.Mutex) {
+func saveAndAnalyzeHTML(r *colly.Response, secretsWriter *bufio.Writer, mu *sync.Mutex, logger *slog.Logger) {
 	urlStr := r.Request.URL.String()
 	sanitizedFilename := sanitizeTargetForPath(urlStr) + ".html"
 
 	htmlFilesPath := filepath.Join("results", sanitizeTargetForPath(r.Request.URL.Hostname()), "recon", "html_files")
 	if err := os.MkdirAll(htmlFilesPath, 0755); err != nil {
-		slog.Error("Failed to create directory for HTML files", "path", htmlFilesPath, "error", err)
+		logger.Error("Failed to create directory for HTML files", "path", htmlFilesPath, "error", err)
 		return
 	}
 
 	filePath := filepath.Join(htmlFilesPath, sanitizedFilename)
 	if err := os.WriteFile(filePath, r.Body, 0644); err != nil {
-		slog.Error("Failed to save HTML file", "path", filePath, "error", err)
-	} else {
-		slog.Info("Saved HTML file", "path", filePath)
+		logger.Error("Failed to save HTML file", "path", filePath, "error", err)
+	} else { // This function needs logger too
+		logger.Info("Saved HTML file", "path", filePath)
 	}
 
 	htmlContent := string(r.Body)
@@ -1869,7 +1893,7 @@ func saveAndAnalyzeHTML(r *colly.Response, secretsWriter *bufio.Writer, mu *sync
 			mu.Lock()
 			_, _ = secretsWriter.WriteString(fmt.Sprintf("[SECRET] HTML URL: %s, Pattern: %s, Matches: %v\n", urlStr, pattern.String(), matches))
 			mu.Unlock()
-			slog.Info("Found potential secret in HTML file", "url", urlStr, "pattern", pattern.String(), "matches", matches)
+			logger.Info("Found potential secret in HTML file", "url", urlStr, "pattern", pattern.String(), "matches", matches)
 		}
 	}
 	for _, pattern := range endpointPatterns {
@@ -1878,7 +1902,41 @@ func saveAndAnalyzeHTML(r *colly.Response, secretsWriter *bufio.Writer, mu *sync
 			mu.Lock()
 			_, _ = secretsWriter.WriteString(fmt.Sprintf("[ENDPOINT] HTML URL: %s, Pattern: %s, Matches: %v\n", urlStr, pattern.String(), matches))
 			mu.Unlock()
-			slog.Info("Found potential endpoint in HTML file", "url", urlStr, "pattern", pattern.String(), "matches", matches)
+			logger.Info("Found potential endpoint in HTML file", "url", urlStr, "pattern", pattern.String(), "matches", matches)
 		}
 	}
+}
+
+func generateReconSummary(state *reconState) (string, error) {
+	var summary strings.Builder
+	summary.WriteString(fmt.Sprintf("✅ **Recon Summary for: %s**\n\n", state.target))
+
+	// Helper to count lines in a file
+	countLines := func(path string) int {
+		if !fileExistsAndIsNotEmpty(path) {
+			return 0
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return 0
+		}
+		defer file.Close()
+		scanner := bufio.NewScanner(file)
+		count := 0
+		for scanner.Scan() {
+			count++
+		}
+		return count
+	}
+
+	summary.WriteString(fmt.Sprintf("• **Subdomains Found:** %d\n", countLines(state.subdomainsFile)))
+	summary.WriteString(fmt.Sprintf("• **Live Hosts:** %d\n", countLines(state.liveSubdomainsFile)))
+	summary.WriteString(fmt.Sprintf("• **URLs Discovered:** %d\n", countLines(state.urlsFile)))
+	summary.WriteString(fmt.Sprintf("• **Nuclei Findings:** %d\n", countLines(state.nucleiScanFile)))
+	summary.WriteString(fmt.Sprintf("• **OWASP Top 10 Findings:** %d\n", countLines(state.owaspScanFile)))
+	summary.WriteString(fmt.Sprintf("• **Basic Vulnerabilities (XSS/SQLi):** %d\n", countLines(state.vulnerabilityFile)))
+
+	summary.WriteString(fmt.Sprintf("\n*Full results are saved in:* `%s`", state.resultsPath))
+
+	return summary.String(), nil
 }

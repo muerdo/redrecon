@@ -7,16 +7,18 @@ import (
 )
 
 type Config struct {
-	Discord DiscordConfig `mapstructure:"discord"`
-	APIKeys APIKeys       `mapstructure:"api_keys"`
-	Tools   ToolsConfig   `mapstructure:"tools"`
-	Engine  EngineConfig  `mapstructure:"engine"`
+	APIKeys   APIKeys         `mapstructure:"api_keys"`
+	Tools     ToolsConfig     `mapstructure:"tools"`
+	Engine    EngineConfig    `mapstructure:"engine"`
 	Wordlists WordlistsConfig `mapstructure:"wordlists"`
-	Recon   ReconConfig   `mapstructure:"recon"`
+	Recon     ReconConfig     `mapstructure:"recon"`
 }
 
 type DiscordConfig struct {
-	Token string `mapstructure:"token"`
+	Enabled    bool   `mapstructure:"enabled"`
+	Token      string `mapstructure:"token"`
+	Prefix     string `mapstructure:"prefix"`
+	WebhookURL string `mapstructure:"webhook_url"`
 }
 
 type APIKeys struct {
@@ -36,7 +38,8 @@ type ToolsConfig struct {
 }
 
 type EngineConfig struct {
-	MaxParallelTasks int `mapstructure:"max_parallel_tasks"`
+	MaxParallelTasks int           `mapstructure:"max_parallel_tasks"`
+	Discord          DiscordConfig `mapstructure:"discord"`
 }
 type WordlistsConfig struct {
     Subdomains string `mapstructure:"subdomains"`
@@ -50,7 +53,8 @@ type ReconConfig struct {
 
 type NucleiConfig struct {
 	Templates []string `mapstructure:"templates"`
-	OWASPTemplates []string `mapstructure:"owasp_templates"`
+	OWASPTemplates   []string `mapstructure:"owasp_templates"`
+	MonitorTemplates []string `mapstructure:"monitor_templates"`
 }
 
 type BBotConfig struct {

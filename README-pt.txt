@@ -31,6 +31,9 @@ go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
 go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/projectdiscovery/katana/cmd/katana@latest
 go install -v github.com/tomnomnom/waybackurls@latest
+go install -v github.com/bwmarrin/discordgo@latest # Para o bot do Discord
+go install -v golang.org/x/net/publicsuffix@latest
+go install -v github.com/ditashi/jsbeautifier-go@latest
 
 
 3. Compile o RedRecon
@@ -53,14 +56,31 @@ Configuração
 
 Uso
 
+**Bot do Discord**
+
+Para usar o bot do Discord, você precisa:
+1. Criar um aplicativo de bot no Discord Developer Portal.
+2. Obter o token do bot e adicioná-lo ao `config.yaml` em `engine.discord.token`.
+3. Convidar o bot para o seu servidor Discord com as permissões necessárias (ler mensagens, enviar mensagens).
+4. Habilitar o bot em `config.yaml` definindo `engine.discord.enabled: true`.
+5. Inicie o RedRecon. O bot será iniciado em segundo plano.
+6. Inicie o bot com o comando dedicado:
+   ./redrecon bot start
+
 O RedRecon é organizado em vários comandos.
 
 Reconhecimento (`recon`)
 
-Execute um fluxo de trabalho completo de reconhecimento em um domínio alvo.
+Execute um fluxo de trabalho completo de reconhecimento em um ou mais alvos.
 
-# Execute uma varredura completa
+# Execute uma varredura completa em um único domínio
 ./redrecon recon example.com
+
+# Execute uma varredura em múltiplos alvos a partir de um arquivo de texto
+# O arquivo pode conter domínios, subdomínios, wildcards ou URLs.
+# A ferramenta irá normalizá-los para o domínio raiz.
+./redrecon recon targets.txt
+
 # Pule etapas específicas
 ./redrecon recon -s nikto -s bbot example.com
 

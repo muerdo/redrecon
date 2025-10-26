@@ -5,6 +5,16 @@ engine:
   # Maximum number of tasks to run in parallel.
   max_parallel_tasks: 10
 
+  # Discord bot settings
+  discord:
+    enabled: false
+    # Your Discord bot token (get from discord.com/developers/applications)
+    token: "YOUR_DISCORD_BOT_TOKEN_HERE"
+    # Prefix for bot commands (e.g., !recon)
+    prefix: "!"
+    # Webhook URL for notifications (e.g., from monitor mode)
+    webhook_url: "YOUR_DISCORD_WEBHOOK_URL_HERE"
+
 recon:
   # Configuration for reconnaissance steps
   ffuf:
@@ -24,6 +34,25 @@ recon:
 
     # Templates to use for the 'owasp' step.
     owasp_templates: []
+
+    # Templates for the 'monitor' mode.
+    # A curated list for continuous, low-noise, high-impact scanning.
+    monitor_templates:
+      - "cves"
+      - "default-logins"
+      - "exposed-panels"
+      - "exposures"
+      - "file"
+      - "misconfiguration"
+      - "takeovers"
+      - "technologies"
+      - "vulnerabilities"
+      # Tags from OWASP Top 10
+      - "owasp-a1"
+      - "owasp-a2"
+      - "owasp-a3"
+      - "owasp-a4"
+      - "owasp-a5"
 
   bbot:
     # Profile to use for the bbot scan (e.g., recon-light, recon-heavy, full).
