@@ -6,6 +6,8 @@ import (
 
 // AddCommands registers all the command handlers to the root command.
 func AddCommands(root *cobra.Command) {
+	root.AddCommand(ChainCmd)
+	root.AddCommand(BotCmd)
 	root.AddCommand(InfraCmd)
 	root.AddCommand(MonitorCmd)
 	root.AddCommand(ReconCmd)

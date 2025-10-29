@@ -2,53 +2,71 @@ package cmd
 
 import (
 	"fmt"
-	"redrecon/pkg/infra"
 	"log/slog"
+	"os"
+
+	"redrecon/pkg/infra"
+	"redrecon/pkg/target"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	infraTarget    string
-	skipInfraSteps []string
+	infraTarget   string
+	infraTaskName string
+	infraSkipSteps []string
 )
 
 // InfraCmd represents the infra command
 var InfraCmd = &cobra.Command{
 	Use:   "infra <target>",
-	Short: "Executes an infrastructure scan workflow on a target",
-	Long: `The 'infra' command automates a security infrastructure scanning workflow
-against a target domain. It focuses on network-level discovery and analysis:
-
-- Subdomain Enumeration (subfinder)
-- IP Address Resolution (dnsx)
-- Port Scanning (nmap)
-- Service Vulnerability Scanning (nuclei)
-
-All results are saved in 'results/<target>/infra'.
-
-Usage Example:
-  redrecon infra example.com`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Short: "Performs infrastructure scanning on a target",
+	Long:  `The 'infra' command runs tools like nmap to perform infrastructure-level scanning.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
 			infraTarget = args[0]
 		}
 
 		if infraTarget == "" {
-			slog.Error("Target must be specified either as an argument or with the -t/--target flag")
-			return
+			return fmt.Errorf("a target must be specified for the infra command")
 		}
 
-		summary, err := infra.StartInfraScan(infraTarget, skipInfraSteps, slog.Default())
-		if err != nil {
-			// Error is logged within the function
+		var targetsToScan []string
+		if target.IsTargetFile(infraTarget) {
+			parsedTargets, err := target.ParseTargetFile(infraTarget)
+			if err != nil {
+				return fmt.Errorf("failed to parse target file: %w", err)
+			}
+			targetsToScan = parsedTargets
 		} else {
+			targetsToScan = []string{infraTarget}
+		}
+
+		logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+		for _, t := range targetsToScan {
+			var taskIdentifier string
+			if infraTaskName != "" {
+				taskIdentifier = infraTaskName
+			} else {
+				taskIdentifier = t
+			}
+
+			slog.Info("===== STARTING INFRA SCAN =====", "target", t, "task_identifier", taskIdentifier)
+			// Supondo que infra.StartInfra tenha uma assinatura similar a recon.StartRecon
+			summary, _, err := infra.StartInfra(taskIdentifier, t, infraSkipSteps, logger)
+			if err != nil {
+				slog.Error("Infrastructure scan failed", "target", t, "error", err)
+				continue
+			}
 			fmt.Println(summary)
 		}
+		return nil
 	},
 }
 
 func init() {
-	InfraCmd.Flags().StringVarP(&infraTarget, "target", "t", "", "Target domain for infrastructure scan (e.g., example.com)")
-	InfraCmd.Flags().StringSliceVarP(&skipInfraSteps, "skip", "s", []string{}, "Skip a specific step in the infra scan (e.g., nmap, nuclei)")
+	InfraCmd.Flags().StringVarP(&infraTarget, "target", "t", "", "Target for infrastructure scan (domain, IP, file).")
+	InfraCmd.Flags().StringVarP(&infraTaskName, "task-name", "n", "", "Optional name for the task, to group all results under a single directory.")
+	InfraCmd.Flags().StringSliceVarP(&infraSkipSteps, "skip", "s", []string{}, "Comma-separated list of infra steps to skip.")
 }

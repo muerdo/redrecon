@@ -12,82 +12,107 @@ import (
 )
 
 var (
-	reconTarget string
-	skipSteps   []string
+	reconTarget       string
+	reconSkipSteps    []string
+	reconNoRedirects  bool
+	reconTaskName     string
+	reconFollowRedirects bool
 )
 
-// reconCmd represents the recon command
+// ReconCmd represents the recon command
 var ReconCmd = &cobra.Command{
 	Use:   "recon <target>",
-	Short: "Executes a full reconnaissance workflow on a target",
-	Long: `The 'recon' command automates a security reconnaissance workflow
-against a target domain. It orchestrates a sequence of tools to discover
-and analyze assets, including:
+	Short: "Performs web reconnaissance on a target",
+	Long: `The 'recon' command orchestrates a series of tools to perform comprehensive
+web reconnaissance. It discovers subdomains, validates live hosts, crawls for URLs,
+and analyzes JavaScript files for secrets and endpoints.
 
-- Subdomain enumeration (subfinder, shuffledns)
-- Active host validation (httpx)
-- URL collection (katana, waybackurls)
-- JavaScript and Sourcemap analysis
-- Vulnerability scanning (Nuclei, Nikto)
-- General reconnaissance (BBot)
-
-All results are saved in an organized directory at 'results/<target>/recon'.
+This command is the first step in a typical assessment workflow.
 
 Usage Examples:
-  # Run a full reconnaissance on a domain
+  # Run a full reconnaissance on a single target
   redrecon recon example.com
 
-  # Use a custom wordlist for subdomain brute-force
-  redrecon recon -w /path/to/my_wordlist.txt example.com
+  # Run recon on a list of targets from a file
+  redrecon recon targets.txt
 
-  # Skip specific steps (useful for resuming a scan or focusing on certain areas)
-  redrecon recon -s jsanalysis -s nikto example.com
+  # Skip the 'ffuf' and 'wayback' steps during reconnaissance
+  redrecon recon example.com --skip ffuf,wayback
 
-Tips for Effective Reconnaissance:
-  - API Keys: For best results with 'subfinder', configure your API keys
-    in the '~/.config/subfinder/provider-config.yaml' file.
-  - Wordlists: The quality of your subdomain wordlist directly impacts the
-    brute-force results. Use high-quality lists.
-  - Tools: Ensure all external tools (nuclei, nikto, bbot, etc.)
-    are installed and available in your system's PATH.`,
-	Run: func(cmd *cobra.Command, args []string) {
+  # Disable following HTTP redirects during live host validation
+  redrecon recon example.com --no-redirects`,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
 			reconTarget = args[0]
 		}
 
 		if reconTarget == "" {
-			slog.Error("A target or target file must be specified.")
-			return
+			return fmt.Errorf("a target or target file must be specified for the recon command")
 		}
 
 		var targetsToScan []string
-
-		if target.IsTargetFile(reconTarget) {
+		if target.IsTargetDirectory(reconTarget) {
+			parsedTargets, err := target.ParseTargetDirectory(reconTarget)
+			if err != nil {
+				return fmt.Errorf("failed to parse target directory: %w", err)
+			}
+			targetsToScan = parsedTargets
+		} else if target.IsTargetFile(reconTarget) {
 			parsedTargets, err := target.ParseTargetFile(reconTarget)
 			if err != nil {
-				slog.Error("Failed to parse target file", "error", err)
-				os.Exit(1)
+				return fmt.Errorf("failed to parse target file: %w", err)
 			}
 			targetsToScan = parsedTargets
 		} else {
 			targetsToScan = []string{reconTarget}
 		}
 
-		for _, t := range targetsToScan {
-			slog.Info("===== Starting full recon for target =====", "target", t)
-			summary, err := recon.StartRecon(t, skipSteps, slog.Default())
-			if err != nil {
-				slog.Error("Reconnaissance failed for target", "target", t, "error", err)
-				// Continue to the next target instead of stopping
-			} else {
-				fmt.Println(summary) // Print summary to console
-			}
-			slog.Info("===== Finished full recon for target =====", "target", t)
+		logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+		
+		// A flag --follow-redirects tem precedência sobre --no-redirects
+		followRedirects := true
+		if reconNoRedirects {
+			followRedirects = false
 		}
+		if reconFollowRedirects {
+			followRedirects = true
+		}
+
+		// Se um nome de tarefa for fornecido, ele tem prioridade e agrupa todos os alvos.
+		if reconTaskName != "" {
+			slog.Info("Processing all targets under a single task name", "task_name", reconTaskName, "target_count", len(targetsToScan))
+			// O "rootTarget" para fins de sumarização e lógica interna será o próprio nome da tarefa.
+			summary, _, err := recon.StartRecon(reconTaskName, reconTaskName, targetsToScan, reconSkipSteps, followRedirects, true, logger) // true para interativo
+			if err != nil {
+				slog.Error("Reconnaissance failed for task", "task_name", reconTaskName, "error", err)
+			}
+			fmt.Println(summary)
+		} else {
+			// Comportamento sem --task-name: processa cada alvo ou grupo de domínio raiz separadamente.
+			rootTargets := make(map[string][]string)
+			for _, t := range targetsToScan {
+				rootDomain := target.GetRootDomain(t)
+				rootTargets[rootDomain] = append(rootTargets[rootDomain], t)
+			}
+
+			for root, subs := range rootTargets {
+				summary, _, err := recon.StartRecon(root, root, subs, reconSkipSteps, followRedirects, true, logger) // true para interativo
+				if err != nil {
+					slog.Error("Reconnaissance failed for root target", "target", root, "error", err)
+					continue
+				}
+				fmt.Println(summary)
+			}
+		}
+
+		return nil
 	},
 }
 
 func init() {
-	ReconCmd.Flags().StringVarP(&reconTarget, "target", "t", "", "Target domain for reconnaissance (e.g., example.com). Can also be provided as an argument.")
-	ReconCmd.Flags().StringSliceVarP(&skipSteps, "skip", "s", []string{}, "Skip a specific step (can be used multiple times). Possible values: subfinder, dnsvalidator, shuffledns, httpx, htmlanalysis, favicon, ffuf, csp, katana, wayback, jsanalysis, vulntests, nuclei, cvesearch, owasp, nikto, bbot")
+	ReconCmd.Flags().StringVarP(&reconTarget, "target", "t", "", "Target for reconnaissance (domain, file, or directory).")
+	ReconCmd.Flags().StringVarP(&reconTaskName, "task-name", "n", "", "Optional name for the task, to group all results under a single directory (e.g., 'QuintoAndar').")
+	ReconCmd.Flags().StringSliceVarP(&reconSkipSteps, "skip", "s", []string{}, "Comma-separated list of recon steps to skip (e.g., 'ffuf,wayback').")
+	ReconCmd.Flags().BoolVar(&reconNoRedirects, "no-redirects", false, "Disable following HTTP redirects (deprecated, use --follow-redirects=false).")
+	ReconCmd.Flags().BoolVar(&reconFollowRedirects, "follow-redirects", true, "Enable or disable following HTTP redirects during live host validation.")
 }

@@ -1,0 +1,5 @@
+# This directory is a Syncthing folder marker.
+# Do not delete.
+
+folderID: redrecon
+created: 2025-10-28T14:43:17-03:00

@@ -82,10 +82,11 @@ func initConfig() {
 }
 
 func main() {
-
 	// This needs to be called before Execute because initConfig is called by cobra.OnInitialize
 	initConfig()
-
+	
+	// Execute the root command. Cobra will parse the command-line arguments
+	// and run the appropriate command's 'Run' function.
 	if err := rootCmd.Execute(); err != nil {
 		slog.Error("Whoops. There was an error while executing your CLI", "error", err)
 		os.Exit(1)

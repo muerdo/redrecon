@@ -61,14 +61,14 @@ RedRecon is organized into several commands.
 
 ### Reconnaissance (`recon`)
 
-Run a full reconnaissance workflow against a target domain.
+Run a full reconnaissance workflow against a target domain. The results are saved in `results/<target>/recon/`.
 
 ```bash
 # Run a full scan
 ./redrecon recon example.com
 
-# Skip specific steps
-./redrecon recon -s nikto -s bbot example.com
+# Use a custom task name to group results differently
+./redrecon recon -n my-project-task example.com
 ```
 
 ### Web Scan (`web`)

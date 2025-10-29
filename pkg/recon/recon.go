@@ -67,7 +67,7 @@ var (
 	sourceMappingURLRegex = regexp.MustCompile(`(?m)^//# sourceMappingURL=(.*)$`)
 )
 
-func sanitizeTargetForPath(target string) string {
+func SanitizeTargetForPath(target string) string {
 	replacer := strings.NewReplacer("http://", "", "https://", "", ":", "_", "/", "_", "?", "_", "&", "_", "=", "_")
 	return replacer.Replace(target)
 }
@@ -77,45 +77,50 @@ type reconState struct {
 	target               string
 	resultsPath          string
 	subdomainsFile       string
+	followRedirects      bool
 	liveSubdomainsFile   string
 	urlsFile             string
 	jsFindingsFile       string
 	techFile             string
 	htmlFindingsFile     string
-	vulnerabilityFile    string
-	metadataFile         string
-	resolversFile        string
-	fuzzResultsDir       string
-	faviconFile          string
-	nucleiScanFile       string
-	cveScanFile          string
-	niktoScanFile        string
-	owaspScanFile        string
-	bbotScanFile         string
 	subdomainWordlist    string
 	fuzzWordlist         string
+	tempDir              string // Diretório temporário para esta execução de recon
 	logger               *slog.Logger // Custom logger for this recon instance
+}
+
+// GetLiveSubdomainsFilePath retorna o caminho esperado para o arquivo live_subdomains.txt de um alvo.
+func GetLiveSubdomainsFilePath(taskIdentifier string) string {
+	sanitizedTaskIdentifier := SanitizeTargetForPath(taskIdentifier)
+	return filepath.Join("results", sanitizedTaskIdentifier, "recon", "live_subdomains.txt")
 }
 
 type reconStep func(state *reconState) error
 
-func StartRecon(target string, skipSteps []string, logger *slog.Logger) (string, error) {
-	slog.Info("Starting reconnaissance process", "target", target)
+func StartRecon(taskIdentifier string, rootTarget string, initialSubdomains []string, skipSteps []string, followRedirects bool, isInteractive bool, logger *slog.Logger) (string, []string, error) {
+	slog.Info("Starting reconnaissance process", "target", rootTarget)
 
-	sanitizedTarget := sanitizeTargetForPath(target)
-	resultsPath := filepath.Join("results", sanitizedTarget, "recon")
+	sanitizedTaskIdentifier := SanitizeTargetForPath(taskIdentifier)
+	resultsPath := filepath.Join("results", sanitizedTaskIdentifier, "recon")
 	slog.Info("Creating output directory", "path", resultsPath)
 
 	err := os.MkdirAll(resultsPath, 0755)
 	if err != nil && !os.IsExist(err) { // Check if error is not just directory already existing
 		slog.Error("Failed to create directory", "path", resultsPath, "error", err)
-		return "", fmt.Errorf("could not create directory %s: %w", resultsPath, err)
+		return "", nil, fmt.Errorf("could not create directory %s: %w", resultsPath, err)
+	}
+
+	// Cria um diretório temporário dentro da pasta de resultados do alvo.
+	tempDir := filepath.Join(resultsPath, "tmp")
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return "", nil, fmt.Errorf("failed to create temporary directory for recon: %w", err)
 	}
 
 	state := &reconState{
 		ctx:                context.Background(),
-		target:             target,
+		target:             rootTarget,
 		resultsPath:        resultsPath,
+		followRedirects:    followRedirects,
 		subdomainsFile:     filepath.Join(resultsPath, "subdomains.txt"),
 		liveSubdomainsFile: filepath.Join(resultsPath, "live_subdomains.txt"),
 		urlsFile:           filepath.Join(resultsPath, "urls.txt"),
@@ -123,18 +128,16 @@ func StartRecon(target string, skipSteps []string, logger *slog.Logger) (string,
 		logger:             logger, // Assign the custom logger
 		techFile:           filepath.Join(resultsPath, "httpx_tech.json"),
 		htmlFindingsFile:   filepath.Join(resultsPath, "html_findings.txt"),
-		vulnerabilityFile:  filepath.Join(resultsPath, "vulnerability_findings.txt"),
-		metadataFile:       filepath.Join(resultsPath, "metadata.txt"),
-		resolversFile:      filepath.Join(resultsPath, "resolvers.txt"),
-		fuzzResultsDir:     filepath.Join(resultsPath, "ffuf_results"),
-		faviconFile:        filepath.Join(resultsPath, "favicon_hashes.json"),
-		nucleiScanFile:     filepath.Join(resultsPath, "nuclei_scan.txt"),
-		cveScanFile:        filepath.Join(resultsPath, "cve_results.json"),
-		niktoScanFile:      filepath.Join(resultsPath, "nikto_scan.txt"),
-		owaspScanFile:      filepath.Join(resultsPath, "owasp_scan.txt"),
-		bbotScanFile:       filepath.Join(resultsPath, "bbot_scan.json"),
 		subdomainWordlist:  config.Cfg.Wordlists.Subdomains,
 		fuzzWordlist:       config.Cfg.Wordlists.Fuzzing,
+		tempDir:            tempDir,
+	}
+
+	// Se subdomínios iniciais foram fornecidos, escreve-os no arquivo de subdomínios.
+	if len(initialSubdomains) > 0 {
+		if err := combineAndDeduplicateURLs(state.subdomainsFile, initialSubdomains); err != nil {
+			return "", nil, fmt.Errorf("failed to write initial subdomains: %w", err)
+		}
 	}
 
 	skipSet := make(map[string]struct{})
@@ -144,75 +147,83 @@ func StartRecon(target string, skipSteps []string, logger *slog.Logger) (string,
 
 	workflow := map[string]reconStep{
 		"subfinder":     stepRunSubfinder,
-		"dnsvalidator":  stepRunDNSValidator,
 		"shuffledns":    stepRunShuffleDNS,
 		"httpx":         stepRunHttpx,
-		"htmlanalysis":  stepRunHTMLAnalysis,
 		"favicon":       stepRunFaviconHash,
+		"waf":           stepRunWafw00f,
+		"sitemap":       stepGetSitemapURLs,
+		"htmlanalysis":  stepRunHTMLAnalysis,
 		"ffuf":          stepRunFuzzing,
 		"csp":           stepGetCSPDomains,
+		"portscan":      stepRunPortScan,
 		"katana":        stepRunKatana,
 		"wayback":       stepGetWaybackURLs,
 		"jsanalysis":    stepRunJSAnalysis,
-		"vulntests":     stepRunVulnerabilityTests,
-		"nuclei":        stepRunNucleiScan,
-		"cvesearch":     stepRunCVESearch,
-		"owasp":         stepRunOWASPTests,
-		"nikto":         stepRunNikto,
-		"bbot":          stepRunBBot,
 	}
 
 	executionOrder := []string{ // Define the order of execution
-		"subfinder", "dnsvalidator", "shuffledns", "httpx", "htmlanalysis", "favicon", "ffuf",
-		"csp", "katana", "wayback", "jsanalysis", "vulntests", "nuclei", "cvesearch", "owasp", "nikto", "bbot",
+		"subfinder", "shuffledns", "httpx", "portscan", "favicon", "waf", "csp", "sitemap", "katana", "wayback", "htmlanalysis", "jsanalysis", "ffuf",
 	}
 
-	slog.Info("Output directory created successfully. Starting reconnaissance tasks.")
+	logger.Info("Output directory created successfully. Starting reconnaissance tasks.")
 
-	skipInputChan := make(chan string)
-	go func() {
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			skipInputChan <- strings.TrimSpace(scanner.Text())
-		}
-	}()
-
-	for _, stepName := range executionOrder {
-		if _, shouldSkip := skipSet[stepName]; shouldSkip {
-			state.logger.Warn("Skipping step as requested", "step", stepName)
-			continue
-		}
-
-		stepFunc := workflow[stepName]
-
-		stepCtx, cancelStep := context.WithCancel(state.ctx)
-		defer cancelStep()
-
-		errChan := make(chan error, 1)
-
-		fmt.Printf("\n-> Press 's' and Enter to skip the current step: [%s]\n", stepName)
-		state.logger.Info(fmt.Sprintf("Starting step: %s", stepName))
+	if isInteractive {
+		// Lógica interativa para pular etapas
+		skipInputChan := make(chan string)
 		go func() {
-			stepState := *state
-			stepState.ctx = stepCtx
-			errChan <- stepFunc(&stepState)
+			scanner := bufio.NewScanner(os.Stdin)
+			for scanner.Scan() {
+				skipInputChan <- strings.TrimSpace(scanner.Text())
+			}
 		}()
 
-		select {
-		case err := <-errChan:
-			if err != nil {
+		for _, stepName := range executionOrder {
+			if _, shouldSkip := skipSet[stepName]; shouldSkip {
+				state.logger.Warn("Skipping step as requested", "step", stepName)
+				continue
+			}
+
+			stepFunc := workflow[stepName]
+			stepCtx, cancelStep := context.WithCancel(state.ctx)
+			defer cancelStep()
+			errChan := make(chan error, 1)
+
+			fmt.Printf("\n-> Press 's' and Enter to skip the current step: [%s]\n", stepName)
+			state.logger.Info(fmt.Sprintf("Starting step: %s", stepName))
+			go func() {
+				stepState := *state
+				stepState.ctx = stepCtx
+				errChan <- stepFunc(&stepState)
+			}()
+
+			select {
+			case err := <-errChan:
+				if err != nil {
+					state.logger.Error("A reconnaissance step failed", "step", stepName, "error", err)
+				}
+			case input := <-skipInputChan:
+				if strings.ToLower(input) == "s" {
+					state.logger.Warn("User requested to skip step. Cancelling...", "step", stepName)
+					cancelStep()
+					<-errChan
+				}
+			case <-state.ctx.Done():
+				slog.Info("Reconnaissance process cancelled.", "error", state.ctx.Err())
+				cancelStep()
+				return "", nil, state.ctx.Err()
+			}
+		}
+	} else {
+		// Lógica não interativa (para o 'chain')
+		for _, stepName := range executionOrder {
+			if _, shouldSkip := skipSet[stepName]; shouldSkip {
+				state.logger.Warn("Skipping step as requested", "step", stepName)
+				continue
+			}
+			state.logger.Info(fmt.Sprintf("Starting step: %s", stepName))
+			if err := workflow[stepName](state); err != nil { // O erro já é logado dentro da função do passo
 				state.logger.Error("A reconnaissance step failed", "step", stepName, "error", err)
 			}
-		case input := <-skipInputChan:
-			if strings.ToLower(input) == "s" {
-				state.logger.Warn("User requested to skip step. Cancelling...", "step", stepName)
-				cancelStep()
-				<-errChan
-			} // else if input is not 's', it's ignored and the step continues
-		case <-state.ctx.Done():
-			slog.Info("Reconnaissance process cancelled.", "error", state.ctx.Err())
-			cancelStep()
-			return "", state.ctx.Err()
 		}
 	}
 
@@ -222,25 +233,86 @@ func StartRecon(target string, skipSteps []string, logger *slog.Logger) (string,
 
 func stepRunSubfinder(state *reconState) error {
 	state.logger.Info("--- Starting: Passive Subdomain Enumeration (subfinder) ---")
-	err := runSubfinder(state.ctx, state.target, state.subdomainsFile, state.logger)
-	if err == nil {
-		state.logger.Info("Passive Subdomain Enumeration completed", "output_file", state.subdomainsFile)
+	// Foco no subfinder por ser rápido e eficaz. Amass e outros podem ser adicionados de volta se necessário.
+
+	// Define a ordem de prioridade para a execução das ferramentas de enumeração.
+	// sublist3r é priorizado por não depender de chaves de API.
+	orderedTools := []struct {
+		name    string
+		runFunc func(context.Context, string, string, string, *slog.Logger) error
+	}{
+		{"sublist3r", runSublist3r},
+		{"subfinder", runSubfinder},
+		{"amass", runAmass},
 	}
-	return err
+
+	var tempFiles []string
+
+	for _, tool := range orderedTools {
+		// Verifica se o contexto foi cancelado antes de iniciar uma nova ferramenta.
+		if state.ctx.Err() != nil {
+			state.logger.Warn("Reconnaissance cancelled, stopping subdomain enumeration.", "error", state.ctx.Err())
+			break
+		}
+
+		if !CommandExists(tool.name) {
+			state.logger.Warn(fmt.Sprintf("%s is not installed or not executable. Skipping.", tool.name), "tool", tool.name)
+			continue
+		}
+
+		tempOutputFile := filepath.Join(state.tempDir, fmt.Sprintf("%s_output.txt", tool.name))
+		if runErr := tool.runFunc(state.ctx, state.target, tempOutputFile, state.tempDir, state.logger); runErr != nil {
+			state.logger.Warn("Subdomain enumeration tool finished with an error.", "tool", tool.name)
+		}
+		if FileExistsAndIsNotEmpty(tempOutputFile) {
+			tempFiles = append(tempFiles, tempOutputFile)
+		}
+	}
+
+	// Consolida os resultados de todos os arquivos temporários.
+	var allSubdomains []string
+	for _, f := range tempFiles {
+		subs, err := ReadLines(f)
+		if err == nil {
+			allSubdomains = append(allSubdomains, subs...)
+		}
+		os.Remove(f) // Limpa o arquivo temporário.
+	}
+
+	if err := combineAndDeduplicateURLs(state.subdomainsFile, allSubdomains); err != nil {
+		return fmt.Errorf("failed to consolidate subdomain results: %w", err)
+	}
+
+	if FileExistsAndIsNotEmpty(state.subdomainsFile) {
+		state.logger.Info("Passive Subdomain Enumeration completed", "output_file", state.subdomainsFile)
+	} else {
+		// Se, após todas as ferramentas, nenhum subdomínio for encontrado, não há como continuar.
+		state.logger.Error("Passive subdomain enumeration finished, but no subdomains were found. Stopping recon.", "target", state.target)
+		return fmt.Errorf("no subdomains found for %s after passive enumeration", state.target)
+	}
+	return nil
 }
 
-func stepRunDNSValidator(state *reconState) error {
-	state.logger.Info("--- Starting: DNS Resolver Validation (dnsvalidator) ---")
-	err := runDNSValidator(state.ctx, state.resolversFile, state.logger)
-	if err == nil {
-		state.logger.Info("DNS Resolver Validation completed", "output_file", state.resolversFile)
+func stepRunFaviconHash(state *reconState) error {
+	state.logger.Info("--- Starting: Favicon Hash Analysis ---")
+	faviconOutputFile := filepath.Join(state.resultsPath, "favicon_hashes.json")
+	err := runFaviconHash(state.ctx, state.liveSubdomainsFile, faviconOutputFile, state.logger)
+	if err != nil {
+		return err
 	}
-	return err
+	if FileExistsAndIsNotEmpty(faviconOutputFile) {
+		state.logger.Info("Favicon analysis completed", "output_file", faviconOutputFile)
+	}
+	return nil
 }
 
 func stepRunShuffleDNS(state *reconState) error {
+	if !CommandExists("shuffledns") {
+		state.logger.Error("shuffledns is not installed or not executable. Please check your PATH and permissions.", "tool", "shuffledns")
+		return fmt.Errorf("shuffledns not found or not executable")
+	}
 	state.logger.Info("--- Starting: Active Subdomain Enumeration (shuffledns) ---")
-	foundSubdomains, err := runShuffleDNS(state.ctx, state.target, state.subdomainWordlist, state.resolversFile, state.subdomainsFile, state.logger)
+	foundSubdomains, err := runShuffleDNS(state.ctx, state.target, state.subdomainWordlist, state.subdomainsFile, state.tempDir, state.logger)
 	if err != nil {
 		return err
 	}
@@ -253,21 +325,25 @@ func stepRunShuffleDNS(state *reconState) error {
 }
 
 func stepRunHttpx(state *reconState) error {
+	if !CommandExists("httpx") {
+		state.logger.Error("httpx is not installed or not executable. Please check your PATH and permissions.", "tool", "httpx")
+		return fmt.Errorf("httpx not found or not executable")
+	}
 	state.logger.Info("--- Starting: Live Subdomain Validation (httpx) ---")
-	err := runHttpx(state.ctx, state.subdomainsFile, state.liveSubdomainsFile, state.techFile, state.logger)
+	err := runHttpx(state.ctx, state.subdomainsFile, state.liveSubdomainsFile, state.techFile, state.tempDir, state.followRedirects, state.logger)
 	if err == nil {
 		state.logger.Info("Live Subdomain Validation completed", "output_file", state.liveSubdomainsFile)
-	}
+	} // Se err não for nil, ele será retornado por stepRunHttpx
 	return err
 }
 
 func stepRunHTMLAnalysis(state *reconState) error {
 	state.logger.Info("--- Starting: HTML Source Code Analysis ---")
-	err := runHTMLAnalysis(state.ctx, state.liveSubdomainsFile, state.htmlFindingsFile, state.logger)
-	if err != nil {
+	// Passa o estado completo para que a função tenha acesso ao resultsPath.
+	if err := runHTMLAnalysis(state); err != nil {
 		return err
 	}
-	if fileExistsAndIsNotEmpty(state.htmlFindingsFile) {
+	if FileExistsAndIsNotEmpty(state.htmlFindingsFile) {
 		state.logger.Info("HTML analysis completed", "output_file", state.htmlFindingsFile)
 	} else {
 		state.logger.Info("HTML analysis completed with no new findings.")
@@ -275,30 +351,56 @@ func stepRunHTMLAnalysis(state *reconState) error {
 	return nil
 }
 
-func stepRunFaviconHash(state *reconState) error {
-	state.logger.Info("--- Starting: Favicon Hash Analysis ---")
-	err := runFaviconHash(state.ctx, state.liveSubdomainsFile, state.faviconFile, state.logger)
-	if err != nil {
-		return err
-	}
-	if fileExistsAndIsNotEmpty(state.faviconFile) {
-		state.logger.Info("Favicon hash analysis completed", "output_file", state.faviconFile)
-	} else {
-		state.logger.Info("Favicon hash analysis completed with no findings.")
-	}
-	return nil
-}
-
 func stepRunFuzzing(state *reconState) error {
+	if !CommandExists("ffuf") {
+		state.logger.Error("ffuf is not installed or not executable. Please check your PATH and permissions.", "tool", "ffuf")
+		return fmt.Errorf("ffuf not found or not executable")
+	}
 	state.logger.Info("--- Starting: Directory and File Fuzzing (ffuf) ---")
-	err := runFfuf(state.ctx, state.liveSubdomainsFile, state.fuzzWordlist, state.fuzzResultsDir, state.logger)
+	fuzzResultsDir := filepath.Join(state.resultsPath, "ffuf_results")
+
+	var ffufRateLimit int
+	if config.Cfg.Engine.WAF.Enabled {
+		profile := config.Cfg.Engine.WAF.DefaultProfile
+		ffufRateLimit = profile.RateLimit
+		state.logger.Info("Applying default WAF rate limit for Fuzzing (ffuf).", "rate_limit", ffufRateLimit)
+	}
+
+	// Executa ffuf e dirsearch em paralelo para maximizar a cobertura de fuzzing.
+	var wg sync.WaitGroup
+	errChan := make(chan error, 2)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		state.logger.Info("Starting ffuf fuzzing...")
+		if err := RunFfuf(state.ctx, state.liveSubdomainsFile, state.fuzzWordlist, fuzzResultsDir, ffufRateLimit, state.logger); err != nil {
+			errChan <- err
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		state.logger.Info("Starting dirsearch fuzzing...")
+		dirsearchOutputDir := filepath.Join(state.resultsPath, "dirsearch_results")
+		if err := runDirsearch(state.ctx, state.liveSubdomainsFile, state.fuzzWordlist, dirsearchOutputDir, ffufRateLimit, state.logger); err != nil {
+			errChan <- err
+		}
+	}()
+
+	wg.Wait()
+	close(errChan)
+
+	// Captura o primeiro erro, se houver.
+	err := <-errChan
 	if err != nil {
 		return err
 	}
 
 	// Check if the directory was created and is not empty
-	if dirExistsAndIsNotEmpty(state.fuzzResultsDir) {
-		state.logger.Info("Fuzzing completed", "output_dir", state.fuzzResultsDir)
+	if dirExistsAndIsNotEmpty(fuzzResultsDir) {
+		state.logger.Info("Fuzzing completed", "output_dir", fuzzResultsDir)
 	} else {
 		state.logger.Info("Fuzzing completed with no findings.")
 	}
@@ -306,8 +408,12 @@ func stepRunFuzzing(state *reconState) error {
 }
 
 func stepRunKatana(state *reconState) error {
+	if !CommandExists("katana") {
+		state.logger.Error("katana is not installed or not executable. Please check your PATH and permissions.", "tool", "katana")
+		return fmt.Errorf("katana not found or not executable")
+	}
 	state.logger.Info("--- Starting: URL Collection (katana) ---")
-	err := runKatana(state.ctx, state.liveSubdomainsFile, state.urlsFile, state.logger)
+	err := runKatana(state.ctx, state.liveSubdomainsFile, state.urlsFile, state.tempDir, state.logger) // O erro já é logado dentro da função
 	if err == nil {
 		state.logger.Info("URL Collection completed", "output_file", state.urlsFile)
 	}
@@ -317,7 +423,7 @@ func stepRunKatana(state *reconState) error {
 func stepRunJSAnalysis(state *reconState) error {
 	state.logger.Info("--- Starting: JavaScript Analysis ---")
 	err := runJSAnalysis(state.ctx, state.urlsFile, state.jsFindingsFile, state.logger)
-	if err == nil {
+	if err == nil && FileExistsAndIsNotEmpty(state.jsFindingsFile) {
 		state.logger.Info("JavaScript Analysis completed", "output_file", state.jsFindingsFile)
 	}
 	return err
@@ -327,7 +433,7 @@ func stepGetWaybackURLs(state *reconState) error { // This function needs logger
 	state.logger.Info("--- Starting: Augmenting with Wayback Machine URLs ---")
 	waybackURLs, err := getWaybackURLs(state.ctx, state.target, state.logger)
 	if err != nil {
-		state.logger.Warn("Failed to get URLs from Wayback Machine, continuing with existing URLs", "error", err)
+		state.logger.Warn("Failed to get URLs from Wayback Machine, but continuing...", "error", err)
 		return nil
 	}
 	if len(waybackURLs) > 0 {
@@ -340,11 +446,58 @@ func stepGetWaybackURLs(state *reconState) error { // This function needs logger
 	return nil
 }
 
+func stepRunPortScan(state *reconState) error {
+	if !CommandExists("naabu") {
+		state.logger.Warn("naabu is not installed, skipping port scan.", "help", "go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest")
+		return nil
+	}
+	state.logger.Info("--- Starting: Port Scanning (naabu) ---")
+	portScanOutputFile := filepath.Join(state.resultsPath, "portscan_results.txt")
+	err := runPortScan(state.ctx, state.liveSubdomainsFile, portScanOutputFile, state.logger)
+	if err != nil {
+		return err
+	}
+	state.logger.Info("Port scanning completed", "output_file", portScanOutputFile)
+	return nil
+}
+
+func stepRunWafw00f(state *reconState) error {
+	if !config.Cfg.Engine.WAF.Enabled {
+		state.logger.Info("WAF detection is disabled in config, skipping.")
+		return nil
+	}
+	state.logger.Info("--- Starting: WAF Detection (wafw00f) ---")
+	wafOutputFile := filepath.Join(state.resultsPath, "waf_results.json")
+	err := runWafw00f(state.ctx, state.liveSubdomainsFile, wafOutputFile, state.logger)
+	if err != nil {
+		return err // O erro já é logado dentro da função
+	}
+	state.logger.Info("WAF detection completed", "output_file", wafOutputFile)
+	return nil
+}
+
+func stepGetSitemapURLs(state *reconState) error {
+	state.logger.Info("--- Starting: Sitemap URL Extraction ---")
+	// Usamos o target principal, pois sitemaps geralmente estão no domínio raiz.
+	sitemapURLs, err := parseSitemap(state.ctx, state.target, state.logger)
+	if err != nil {
+		state.logger.Warn("Failed to get URLs from sitemap, but continuing...", "error", err)
+		return nil // Não é um erro fatal
+	}
+	if len(sitemapURLs) > 0 {
+		if err := combineAndDeduplicateURLs(state.urlsFile, sitemapURLs); err != nil {
+			return fmt.Errorf("failed to combine sitemap URLs: %w", err)
+		}
+		state.logger.Info("Successfully added URLs from sitemap", "count", len(sitemapURLs))
+	}
+	return nil
+}
+
 func stepGetCSPDomains(state *reconState) error {
 	state.logger.Info("--- Starting: CSP Header Subdomain Extraction ---")
 	cspDomains, err := getCSPDomains(state.ctx, state.liveSubdomainsFile, state.target, state.logger)
 	if err != nil { // This function needs logger too
-		state.logger.Warn("Failed to get subdomains from CSP headers", "error", err)
+		state.logger.Warn("Failed to get subdomains from CSP headers, but continuing...", "error", err)
 		return nil
 	}
 	if len(cspDomains) > 0 {
@@ -355,103 +508,9 @@ func stepGetCSPDomains(state *reconState) error {
 	return nil
 }
 
-func stepRunVulnerabilityTests(state *reconState) error {
-	state.logger.Info("--- Starting: Basic Vulnerability Tests (XSS, SQLi) ---")
-
-	if !fileExistsAndIsNotEmpty(state.urlsFile) {
-		state.logger.Warn("Input file for vulnerability tests is empty, skipping.", "file", state.urlsFile)
-		return nil
-	}
-
-	state.logger.Info("Executing external httpx command for vulnerability tests.")
-	xssPayloads := `"><script>alert('XSS')</script>,'"--> </style></scRipt><scRipt>alert('XSS')</scRipt>`
-
-	cmd := exec.CommandContext(state.ctx, "httpx",
-		"-l", state.urlsFile,
-		"-o", state.vulnerabilityFile,
-		"-silent",
-		"-no-color",
-		"-threads", fmt.Sprintf("%d", config.Cfg.Engine.MaxParallelTasks),
-		"-timeout", "10",
-		"-follow-redirects",
-		"-random-agent",
-		"-xss", "-xss-payload", xssPayloads,
-		"-sqli",
-		"-unsafe",
-	)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("httpx (vulnerability) execution failed: %w\nStderr: %s", err, stderr.String())
-	} // This function needs logger too
-
-	if fileExistsAndIsNotEmpty(state.vulnerabilityFile) {
-		state.logger.Info("Vulnerability testing completed", "output_file", state.vulnerabilityFile)
-	}
-	return nil
-}
-
-func stepRunNucleiScan(state *reconState) error {
-	state.logger.Info("--- Starting: Vulnerability Scanning (Nuclei) ---")
-	err := runNucleiScan(state.ctx, state.liveSubdomainsFile, state.nucleiScanFile, state.logger)
-	if err != nil {
-		return err
-	}
-	if fileExistsAndIsNotEmpty(state.nucleiScanFile) { // This function needs logger too
-		state.logger.Info("Nuclei scan completed", "output_file", state.nucleiScanFile)
-	} // This function needs logger too
-	return nil
-}
-
-func stepRunCVESearch(state *reconState) error {
-	state.logger.Info("--- Starting: Known Vulnerability Search (CVE API) ---")
-	err := runCVESearch(state.ctx, state.techFile, state.cveScanFile, state.logger)
-	if err != nil {
-		return err
-	}
-	if fileExistsAndIsNotEmpty(state.cveScanFile) { // This function needs logger too
-		state.logger.Info("CVE search completed", "output_file", state.cveScanFile)
-	} // This function needs logger too
-	return nil
-}
-
-func stepRunOWASPTests(state *reconState) error { // This function needs logger too
-	state.logger.Info("--- Starting: OWASP Top 10 Intrusion Tests (Nuclei) ---")
-	err := runOWASPTests(state.ctx, state.liveSubdomainsFile, state.owaspScanFile, state.logger)
-	if err != nil {
-		return err
-	}
-	if fileExistsAndIsNotEmpty(state.owaspScanFile) {
-		state.logger.Info("OWASP Top 10 tests completed", "output_file", state.owaspScanFile)
-	} else { // This function needs logger too
-		state.logger.Info("OWASP Top 10 tests completed with no findings.")
-	}
-	return nil
-}
-
-func stepRunNikto(state *reconState) error { // This function needs logger too
-	state.logger.Info("--- Starting: Web Server Scanning (Nikto) ---")
-	err := runNikto(state.ctx, state.liveSubdomainsFile, state.niktoScanFile, state.logger)
-	if err != nil {
-		return err
-	}
-	if fileExistsAndIsNotEmpty(state.niktoScanFile) {
-		state.logger.Info("Nikto scan completed", "output_file", state.niktoScanFile)
-	} // This function needs logger too
-	return nil
-}
-
-func stepRunBBot(state *reconState) error {
-	state.logger.Info("--- Starting: Full-scope Recon (BBot) ---")
-	err := runBBot(state.ctx, state.target, state.bbotScanFile, state.logger)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func fileExistsAndIsNotEmpty(path string) bool {
+// FileExistsAndIsNotEmpty verifica se um arquivo existe e não está vazio.
+// Tornada pública para ser usada por outros pacotes.
+func FileExistsAndIsNotEmpty(path string) bool {
 	stat, err := os.Stat(path)
 	return !os.IsNotExist(err) && stat.Size() > 0
 }
@@ -462,80 +521,169 @@ func dirExistsAndIsNotEmpty(path string) bool {
 	return err == nil && len(entries) > 0
 }
 
-func runSubfinder(ctx context.Context, target, outputFile string, logger *slog.Logger) error {
-	logger.Info("Starting subfinder", "target", target)
-	logger.Info("Executing external subfinder command. Ensure it's installed and configured in your system's PATH.")
-	logger.Info("API keys should be configured in the default provider-config.yaml file.")
+// CommandExists checks if a command exists in the system's PATH.
+func CommandExists(cmd string) bool {
+	path, err := exec.LookPath(cmd)
+	if err != nil {
+		return false
+	}
+	// Check if the file is executable
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.Mode()&0111 != 0
+}
 
-	cmd := exec.CommandContext(ctx, "subfinder",
-		"-d", target,
-		"-o", outputFile,
-		"-silent",
-		"-t", "10",
-		"-timeout", "30",
-		"-max-time", "10",
-	)
+// executeCommand é uma função auxiliar para executar comandos externos de forma padronizada.
+// Ela lida com a captura de stderr, logging e tratamento de erros comuns.
+// Retorna o stdout do comando e um erro formatado em caso de falha.
+func ExecuteCommand(ctx context.Context, logger *slog.Logger, toolName string, args ...string) (string, error) {
+	logger.Info(fmt.Sprintf("Executing external command: %s", toolName), "args", args)
 
-	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, config.GetToolPath(toolName), args...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
-	if err != nil {
-		logger.Error("Subfinder command failed", "error", err, "stderr", stderr.String())
-		return fmt.Errorf("subfinder execution failed: %w\nStderr: %s", err, stderr.String())
+	if err := cmd.Run(); err != nil {
+		// Se o contexto foi cancelado, o erro é esperado, mas não é uma falha da ferramenta.
+		if ctx.Err() == context.Canceled {
+			logger.Warn("Command execution was cancelled", "tool", toolName)
+			return "", nil // Retorna string vazia e nil para indicar que foi um cancelamento.
+		}
+		// Retorna um erro formatado com o stderr para fornecer contexto completo ao chamador.
+		return "", fmt.Errorf("%s execution failed: %w\nStderr: %s", toolName, err, stderr.String())
+	}
+
+	// Loga o stderr mesmo em caso de sucesso, pois algumas ferramentas o usam para informações de status.
+	if stderr.Len() > 0 {
+		logger.Debug("Command finished with output on stderr", "tool", toolName, "stderr", stderr.String())
+	}
+
+	return stdout.String(), nil
+}
+
+func runSubfinder(ctx context.Context, target, outputFile, tempDir string, logger *slog.Logger) error {
+	logger.Info("Starting subfinder", "target", target)
+	logger.Info("API keys should be configured in the default provider-config.yaml file.")
+
+	args := []string{"-d", target, "-o", outputFile, "-t", "50", "-timeout", "30", "-tmp-dir", tempDir, "-max-time", "600"}
+	if _, err := ExecuteCommand(ctx, logger, "subfinder", args...); err != nil {
+		// A lógica do subfinder é especial: mesmo que falhe, queremos continuar se já houver dados.
+		// Por isso, logamos o erro mas não o retornamos para cima na cadeia.
+		if !FileExistsAndIsNotEmpty(outputFile) {
+			logger.Warn("Subfinder command failed and produced no output. This is often due to missing API keys in provider-config.yaml.", "error", err)
+		} else {
+			logger.Error("Subfinder command finished with an error, but an output file was found. Proceeding with existing data.", "error", err)
+		}
 	}
 
 	return nil
 }
 
-func runHttpx(ctx context.Context, inputFile, liveHostsOutputFile, techOutputFile string, logger *slog.Logger) error {
+func runAmass(ctx context.Context, target, outputFile, tempDir string, logger *slog.Logger) error {
+	logger.Info("Starting amass", "target", target)
+	logger.Info("Executing external amass command. This may take some time.")
+	args := []string{
+		"enum",
+		"-passive", // Modo passivo para não enviar tráfego para o alvo
+		"-d", target,
+		"-o", outputFile,
+		"-dir", filepath.Join(tempDir, "amass_cache"), // Usa um diretório de cache temporário
+	}
+	if _, err := ExecuteCommand(ctx, logger, "amass", args...); err != nil {
+		logger.Error("Amass command failed", "error", err)
+		return err
+	}
+
+	return nil
+}
+
+func runSublist3r(ctx context.Context, target, outputFile, tempDir string, logger *slog.Logger) error {
+	logger.Info("Starting sublist3r", "target", target)
+
+	// Sublist3r é uma ferramenta Python, pode precisar de flags específicas.
+	// A flag -o salva a saída em um arquivo.
+	args := []string{"-d", target, "-o", outputFile}
+	if _, err := ExecuteCommand(ctx, logger, "sublist3r", args...); err != nil {
+		logger.Error("Sublist3r command failed", "error", err)
+		return err
+	}
+	return nil // Retorna nil em caso de sucesso
+}
+
+func runHttpx(ctx context.Context, inputFile, liveHostsOutputFile, techOutputFile, tempDir string, followRedirects bool, logger *slog.Logger) error {
 	logger.Info("Starting httpx to find live subdomains", "input", inputFile)
 
-	if !fileExistsAndIsNotEmpty(inputFile) {
+	if !FileExistsAndIsNotEmpty(inputFile) {
 		logger.Warn("Input file for httpx does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
 
-	logger.Info("Executing external httpx command. Ensure it's installed in your system's PATH.")
-
-	cmd := exec.CommandContext(ctx, "httpx",
+	// --- Primeira chamada ao httpx: Encontrar hosts ativos ---
+	logger.Info("Running httpx to find live hosts...")
+	argsLive := []string{
 		"-l", inputFile,
 		"-o", liveHostsOutputFile,
 		"-threads", "50",
-		"-silent",
 		"-no-color",
-		"-follow-redirects",
 		"-random-agent",
 		"-timeout", "10",
-		// Probe for the top 1000 most common ports
-		"-ports", "top-1000",
-		// Add technology detection and JSON output for it
+		"-tmp-dir", tempDir, // Força o httpx a usar nosso diretório temporário
+	}
+	if followRedirects {
+		argsLive = append(argsLive, "-follow-redirects")
+	}
+
+	if _, err := ExecuteCommand(ctx, logger, "httpx", argsLive...); err != nil {
+		// Se o httpx falhar e não produzir saída, é provável que seja um erro de configuração/execução.
+		// Registramos um aviso forte, mas retornamos nil para não quebrar a cadeia de recon.
+		if !FileExistsAndIsNotEmpty(liveHostsOutputFile) {
+			logger.Warn("httpx command failed and produced no output. Check for configuration or permission issues.", "error", err)
+			return nil
+		}
+		logger.Error("httpx command finished with an error, but an output file was found. Proceeding with existing data.", "error", err)
+	}
+
+	// Verifica se algum host ativo foi encontrado antes de prosseguir
+	if !FileExistsAndIsNotEmpty(liveHostsOutputFile) {
+		// Se o comando foi executado (err == nil) mas não produziu saída,
+		// isso pode indicar um problema, mas não deve parar o fluxo.
+		// Apenas registramos um aviso e retornamos nil para que outras etapas possam continuar.
+		logger.Warn("httpx did not find any live hosts. Skipping technology detection.", "input", inputFile)
+		return nil // Não é um erro, apenas não há nada para fazer
+	}
+
+	// --- Segunda chamada ao httpx: Detectar tecnologias nos hosts ativos ---
+	logger.Info("Running httpx for technology detection on live hosts...")
+	argsTech := []string{
+		"-l", liveHostsOutputFile, // Usa a lista de hosts ativos como entrada
 		"-tech-detect",
-		"-json", "-o", techOutputFile,
-	)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err != nil {
-		return fmt.Errorf("httpx execution failed: %w\nStderr: %s", err, stderr.String())
+		"-json",
+		"-o", techOutputFile,
+		"-no-color",
+		"-tmp-dir", tempDir, // Força o httpx a usar nosso diretório temporário
+	}
+	if _, err := ExecuteCommand(ctx, logger, "httpx", argsTech...); err != nil {
+		return fmt.Errorf("httpx tech-detect execution failed: %w", err)
 	}
 
 	return nil
 }
 
-func runKatana(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
-	logger.Info("Starting Katana to crawl for URLs", "input", inputFile)
-
-	if !fileExistsAndIsNotEmpty(inputFile) {
+func runKatana(ctx context.Context, inputFile, outputFile, tempDir string, logger *slog.Logger) error {
+	if !FileExistsAndIsNotEmpty(inputFile) {
 		logger.Warn("Input file for Katana does not exist or is empty, skipping.", "file", inputFile)
 		return nil
-	} // This function needs logger too
+	}
 
-	logger.Info("Executing external katana command. Ensure it's installed in your system's PATH.")
+	logger.Info("Starting Katana to crawl for URLs", "input", inputFile)
 
-	cmd := exec.CommandContext(ctx, "katana",
+	args := []string{
+		// O Katana usa '-u' para uma única URL ou '-list' para uma lista.
+		// Como estamos sempre passando um arquivo, usamos '-list'.
 		"-list", inputFile,
 		"-output", outputFile,
 		"-silent",
@@ -547,15 +695,18 @@ func runKatana(ctx context.Context, inputFile, outputFile string, logger *slog.L
 		"-concurrency", "10",
 		"-parallelism", "10",
 		"-known-files", "all",
-		"-ef", "js,json,html,txt,xml",
-	)
+		"-tmp-dir", tempDir, // Força o katana a usar nosso diretório temporário
+	}
 
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	if _, err := ExecuteCommand(ctx, logger, "katana", args...); err != nil {
+		// Katana pode falhar, mas não queremos que isso quebre a cadeia. Logamos e continuamos.
+		logger.Error("Katana execution failed", "error", err)
+	}
 
-	err := cmd.Run()
-	if err != nil {
-		return fmt.Errorf("katana execution failed: %w\nStderr: %s", err, stderr.String())
+	// Se o comando foi executado com sucesso, mas não criou um arquivo de saída,
+	// isso não é necessariamente um erro (pode não ter encontrado URLs), então apenas registramos.
+	if !FileExistsAndIsNotEmpty(outputFile) {
+		logger.Info("Katana ran successfully but found no new URLs.", "input", inputFile)
 	}
 
 	return nil
@@ -601,7 +752,9 @@ func combineAndDeduplicateURLs(filePath string, newURLs []string) error {
 	return writer.Flush()
 }
 
-func readLines(filePath string) ([]string, error) {
+// ReadLines lê todas as linhas de um arquivo e as retorna como um slice de strings.
+// Tornada pública para ser usada por outros pacotes.
+func ReadLines(filePath string) ([]string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -648,9 +801,19 @@ func getWaybackURLs(ctx context.Context, domain string, logger *slog.Logger) ([]
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch from Wayback Machine after %d retries: %w", maxRetries, err)
 	}
-	defer resp.Body.Close()
+
+	// Adiciona uma verificação de segurança para garantir que resp não seja nulo antes de prosseguir.
+	if resp == nil {
+		return nil, fmt.Errorf("received nil response from Wayback Machine after retries")
+	}
+	defer resp.Body.Close() // Esta linha agora é segura.
 
 	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		logger.Error("Wayback Machine returned non-200 status",
+			"status_code", resp.StatusCode,
+			"response_body", string(bodyBytes),
+		)
 		return nil, fmt.Errorf("wayback Machine returned non-200 status: %d", resp.StatusCode)
 	}
 
@@ -783,7 +946,7 @@ func parseSitemap(ctx context.Context, domain string, logger *slog.Logger) ([]st
 	return foundURLs, nil
 }
 
-func isMetadataTarget(urlStr string) bool { // This function needs logger too
+func IsMetadataTarget(urlStr string) bool { // This function needs logger too
 	lowerURL := strings.ToLower(urlStr)
 	extensions := []string{".pdf", ".jpg", ".jpeg", ".png", ".gif"}
 	for _, ext := range extensions {
@@ -794,7 +957,7 @@ func isMetadataTarget(urlStr string) bool { // This function needs logger too
 	return false
 }
 // This function needs logger too
-func analyzeFileMetadata(wg *sync.WaitGroup, urlStr string, writer *bufio.Writer, mu *sync.Mutex, logger *slog.Logger) {
+func AnalyzeFileMetadata(wg *sync.WaitGroup, urlStr string, writer *bufio.Writer, mu *sync.Mutex, logger *slog.Logger) {
 	defer wg.Done()
 	logger.Debug("Analyzing file for metadata", "url", urlStr)
 
@@ -897,7 +1060,7 @@ func extractInterestingExif(x *goexif.Exif) []string {
 	return nil
 }
 
-func getJSURLsFromFile(inputFile string) ([]string, error) { // This function needs logger too
+func GetJSURLsFromFile(inputFile string) ([]string, error) {
 	file, err := os.Open(inputFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open input file %s: %w", inputFile, err)
@@ -924,7 +1087,7 @@ func getJSURLsFromFile(inputFile string) ([]string, error) { // This function ne
 	return jsURLs, nil
 }
 
-func downloadContent(urlStr string) ([]byte, error) { // This function needs logger too
+func DownloadContent(urlStr string) ([]byte, error) { // This function needs logger too
 	resp, err := http.Get(urlStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download from %s: %w", urlStr, err)
@@ -959,7 +1122,7 @@ type Finding struct {
 }
 
 // analyzeContentForPatterns verifica o conteúdo em busca de segredos e endpoints.
-func analyzeContentForPatterns(content string) (secrets []Finding, endpoints []Finding) {
+func AnalyzeContentForPatterns(content string) (secrets []Finding, endpoints []Finding) {
 	// Analisa segredos
 	for _, pattern := range secretPatterns {
 		matches := pattern.FindAllString(content, -1)
@@ -1000,7 +1163,7 @@ type URLFindings struct {
 func processSingleJSURL(ctx context.Context, jsURL string, writer *bufio.Writer, mu *sync.Mutex, logger *slog.Logger) { // This function needs logger too
 	logger.Debug("Processing JS file", "url", jsURL)
 
-	body, err := downloadContent(jsURL)
+	body, err := DownloadContent(jsURL)
 	if err != nil {
 		logger.Error("Failed to process JS file", "url", jsURL, "error", err)
 		return
@@ -1009,7 +1172,7 @@ func processSingleJSURL(ctx context.Context, jsURL string, writer *bufio.Writer,
 	jsContent := string(body)
 	beautifiedContent := beautifyJS(jsContent, jsURL, logger)
 
-	jsSecrets, jsEndpoints := analyzeContentForPatterns(beautifiedContent)
+	jsSecrets, jsEndpoints := AnalyzeContentForPatterns(beautifiedContent)
 
 	if len(jsSecrets) > 0 || len(jsEndpoints) > 0 {
 		logger.Info("Found patterns in JS file", "url", jsURL)
@@ -1018,13 +1181,13 @@ func processSingleJSURL(ctx context.Context, jsURL string, writer *bufio.Writer,
 			Secrets:   jsSecrets,
 			Endpoints: jsEndpoints,
 		}
-		writeFindings(writer, mu, "JS", findings)
+		WriteFindings(writer, mu, "JS", findings)
 	}
 
 	findAndAnalyzeSourcemap(jsURL, beautifiedContent, writer, mu, logger)
 }
 
-func writeFindings(writer *bufio.Writer, mu *sync.Mutex, sourceType string, findings URLFindings) {
+func WriteFindings(writer *bufio.Writer, mu *sync.Mutex, sourceType string, findings URLFindings) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -1052,12 +1215,12 @@ func writeFindings(writer *bufio.Writer, mu *sync.Mutex, sourceType string, find
 
 func runJSAnalysis(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
 	logger.Info("Starting JavaScript analysis", "input", inputFile)
-	if !fileExistsAndIsNotEmpty(inputFile) {
+	if !FileExistsAndIsNotEmpty(inputFile) {
 		logger.Warn("Input file for JS analysis does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
 
-	jsURLs, err := getJSURLsFromFile(inputFile) // This function needs logger too
+	jsURLs, err := GetJSURLsFromFile(inputFile) // This function needs logger too
 	if err != nil {
 		return err
 	}
@@ -1117,7 +1280,7 @@ func findAndAnalyzeSourcemap(jsURL, jsContent string, writer *bufio.Writer, mu *
 		parsedJSURL, _ := url.Parse(jsURL)
 		absoluteSourceMapURL := parsedJSURL.ResolveReference(&url.URL{Path: sourceMapURL}).String()
 		logger.Debug("Downloading sourcemap", "url", absoluteSourceMapURL)
-		sourceMapContent, err = downloadContent(absoluteSourceMapURL)
+		sourceMapContent, err = DownloadContent(absoluteSourceMapURL)
 	}
 
 	if err != nil {
@@ -1134,7 +1297,7 @@ func findAndAnalyzeSourcemap(jsURL, jsContent string, writer *bufio.Writer, mu *
 			Secrets:   smSecrets,
 			Endpoints: smEndpoints,
 		}
-		writeFindings(writer, mu, "SOURCEMAP", findings)
+		WriteFindings(writer, mu, "SOURCEMAP", findings)
 	}
 }
 
@@ -1156,7 +1319,7 @@ func analyzeSourceMap(jsURL string, content []byte, logger *slog.Logger) (allSec
 
 	logger.Info("Analyzing content from sourcemap", "js_url", jsURL, "source_files", len(sm.SourcesContent))
 	for _, sourceContent := range sm.SourcesContent {
-		secrets, endpoints := analyzeContentForPatterns(sourceContent)
+		secrets, endpoints := AnalyzeContentForPatterns(sourceContent)
 		if len(secrets) > 0 {
 			allSecrets = append(allSecrets, secrets...)
 		}
@@ -1167,72 +1330,67 @@ func analyzeSourceMap(jsURL string, content []byte, logger *slog.Logger) (allSec
 	return allSecrets, allEndpoints
 }
 
-func runDNSValidator(ctx context.Context, outputFile string, logger *slog.Logger) error {
-	logger.Info("Validating public DNS resolvers with dnsvalidator. This may take a moment...")
-	resolversListURL := "https://public-dns.info/nameservers.txt"
-	
-	cmd := exec.CommandContext(ctx, "dnsvalidator",
-		"-tL", resolversListURL,
-		"-threads", "100",
-		"-o", outputFile,
-	)
+// runShuffleDNS executa o shuffledns para resolver e fazer bruteforce de subdomínios.
+func runShuffleDNS(ctx context.Context, domain, wordlist, subdomainsFile, tempDir string, logger *slog.Logger) ([]string, error) {
+	resolversFile := filepath.Join(tempDir, "redrecon_resolvers.txt")
 
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err != nil {
-		return fmt.Errorf("dnsvalidator execution failed: %w\nStderr: %s", err, stderr.String()) // This function needs logger too
+	// Se o arquivo de resolvers não existir no diretório temporário, tenta gerá-lo.
+	if !FileExistsAndIsNotEmpty(resolversFile) {
+		logger.Warn("Resolvers file not found in temporary directory. Attempting to generate it...", "path", resolversFile)
+		// Tenta gerar o arquivo de resolvers, mas com um timeout para não bloquear o fluxo.
+		generateResolvers(resolversFile, logger)
 	}
 
-	if !fileExistsAndIsNotEmpty(outputFile) {
-		return fmt.Errorf("dnsvalidator ran but did not produce a resolver list")
-	} // This function needs logger too
+	hasInputSubs := FileExistsAndIsNotEmpty(subdomainsFile)
+	hasWordlist := wordlist != "" && FileExistsAndIsNotEmpty(wordlist)
 
-	return nil
-}
-
-func runShuffleDNS(ctx context.Context, domain, wordlist, resolversFile, subdomainsFile string, logger *slog.Logger) ([]string, error) {
-	if !fileExistsAndIsNotEmpty(resolversFile) {
-		logger.Warn("Resolvers file for shuffledns does not exist or is empty, skipping.", "file", resolversFile)
-		return nil, nil
-	}
-	if (wordlist == "" || !fileExistsAndIsNotEmpty(wordlist)) && !fileExistsAndIsNotEmpty(subdomainsFile) {
-		logger.Warn("Both subdomain wordlist and input subdomains file are missing, skipping shuffledns.", "wordlist", wordlist, "subdomains_file", subdomainsFile)
+	if !hasInputSubs && !hasWordlist {
+		logger.Warn("Both subdomain wordlist and input subdomains file are missing or empty, skipping shuffledns.", "wordlist", wordlist, "subdomains_file", subdomainsFile)
 		return nil, nil
 	}
 
 	logger.Info("Executing external shuffledns command.", "domain", domain)
 
-	cmd := exec.CommandContext(ctx, "shuffledns",
-		"-d", domain,
-		"-w", wordlist,
-		"-r", resolversFile,
-		"-mode", "bruteforce",
-		"-silent",
-	)
-
-	if fileExistsAndIsNotEmpty(subdomainsFile) {
-		infile, err := os.Open(subdomainsFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open subdomains file for shuffledns stdin: %w", err)
+	var args []string
+	// Prioriza o modo 'bruteforce' se uma wordlist for fornecida, pois ele também resolve.
+	// Se apenas uma lista de subdomínios existir, usa o modo 'resolve'.
+	if hasWordlist {
+		logger.Info("Running shuffledns in 'bruteforce' mode using wordlist.", "wordlist", wordlist)
+		args = []string{
+			"-d", domain,
+			"-w", wordlist,
+			"-mode", "bruteforce",
+			"-silent",
 		}
-		defer infile.Close()
-		cmd.Stdin = infile
+		// Adiciona o arquivo de resolvers apenas se ele foi gerado com sucesso.
+		if FileExistsAndIsNotEmpty(resolversFile) {
+			args = append(args, "-r", resolversFile)
+		}
+		// Se também houver uma lista de subdomínios, adicione-a para resolução.
+		if hasInputSubs {
+			args = append(args, "-list", subdomainsFile)
+		}
+	} else if hasInputSubs { // Apenas a lista de subdomínios existe
+		logger.Info("Running shuffledns in 'resolve' mode using existing subdomains list.", "subdomains_file", subdomainsFile)
+		args = []string{
+			"-d", domain,
+			"-list", subdomainsFile,
+			"-mode", "resolve",
+			"-silent",
+		}
+		if FileExistsAndIsNotEmpty(resolversFile) {
+			args = append(args, "-r", resolversFile)
+		}
 	}
 
-	var out bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	// Executa o comando e captura o stdout.
+	out, err := ExecuteCommand(ctx, logger, "shuffledns", args...)
 	if err != nil {
-		return nil, fmt.Errorf("shuffledns execution failed: %w\nStderr: %s", err, stderr.String())
+		return nil, err // O erro já vem formatado do executeCommand.
 	}
 
 	var foundSubdomains []string
-	for _, line := range strings.Split(out.String(), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		if trimmedLine := strings.TrimSpace(line); trimmedLine != "" {
 			foundSubdomains = append(foundSubdomains, trimmedLine)
 		}
@@ -1240,217 +1398,32 @@ func runShuffleDNS(ctx context.Context, domain, wordlist, resolversFile, subdoma
 	return foundSubdomains, nil
 }
 
-func runNucleiScan(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
-	if !fileExistsAndIsNotEmpty(inputFile) {
-		logger.Warn("Input file for Nuclei does not exist or is empty, skipping.", "file", inputFile)
-		return nil
-	}
-	
-	logger.Info("Executing external nuclei command. Ensure it's installed and templates are updated.")
+// generateResolvers tenta criar uma lista de resolvedores de DNS usando dnsvalidator.
+// Esta função tem seu próprio timeout para não bloquear o processo principal.
+func generateResolvers(outputFile string, logger *slog.Logger) {
+	logger.Info("Using a built-in list of trusted public DNS resolvers.")
 
-	args := []string{
-		"-l", inputFile,
-		"-o", outputFile,
-		"-silent",
-		"-no-color",
-		"-retries", "2",
-		"-timeout", "10",
-		"-bulk-size", "50",
-		"-concurrency", "25",
-	}
-
-	if len(config.Cfg.Recon.Nuclei.Templates) > 0 {
-		logger.Info("Using custom Nuclei templates from config", "templates", config.Cfg.Recon.Nuclei.Templates)
-		args = append(args, "-t", strings.Join(config.Cfg.Recon.Nuclei.Templates, ","))
+	// Lista de resolvedores públicos rápidos e confiáveis.
+	// Isso é muito mais rápido e estável do que validar uma lista enorme a cada execução.
+	resolvers := []string{
+		"1.1.1.1",    // Cloudflare
+		"1.0.0.1",    // Cloudflare
+		"8.8.8.8",    // Google
+		"8.8.4.4",    // Google
+		"9.9.9.9",    // Quad9
+		"149.112.112.112", // Quad9
+		"208.67.222.222", // OpenDNS
+		"208.67.220.220", // OpenDNS
 	}
 
-	cmd := exec.CommandContext(ctx, "nuclei", args...)
+	content := strings.Join(resolvers, "\n")
+	err := os.WriteFile(outputFile, []byte(content), 0644)
 
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
 	if err != nil {
-		return fmt.Errorf("nuclei execution failed: %w\nStderr: %s", err, stderr.String())
+		logger.Error("Failed to write built-in resolvers file. shuffledns will use system resolvers.", "error", err)
+		return
 	}
-
-	return nil
-}
-
-func runOWASPTests(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
-	if !fileExistsAndIsNotEmpty(inputFile) {
-		logger.Warn("Input file for OWASP tests does not exist or is empty, skipping.", "file", inputFile)
-		return nil
-	}
-	
-	logger.Info("Executing external nuclei command for OWASP Top 10 tests. Ensure it's installed and templates are updated.")
-
-	owaspTemplates := config.Cfg.Recon.Nuclei.OWASPTemplates
-	if len(owaspTemplates) == 0 {
-		logger.Warn("No specific OWASP Top 10 templates configured. Using a default set.", "config_path", "config.Cfg.Recon.Nuclei.OWASPTemplates")
-		owaspTemplates = []string{
-			"http/vulnerabilities/access-control/",
-			"http/vulnerabilities/command-injection/",
-			"http/vulnerabilities/crlf-injection/",
-			"http/vulnerabilities/file-inclusion/",
-			"http/vulnerabilities/open-redirect/",
-			"http/vulnerabilities/prototype-pollution/",
-			"http/vulnerabilities/rce/",
-			"http/vulnerabilities/ssrf/",
-			"http/vulnerabilities/sql-injection/",
-			"http/vulnerabilities/xss/",
-			"http/miscellaneous/exposed-panels/",
-			"http/miscellaneous/default-credentials/",
-			"http/miscellaneous/insecure-configurations/",
-			"http/technologies/outdated-versions/",
-		}
-	}
-
-	return executeNucleiCommand(ctx, inputFile, outputFile, owaspTemplates, logger)
-}
-
-func executeNucleiCommand(ctx context.Context, inputFile, outputFile string, templates []string, logger *slog.Logger) error {
-	if !fileExistsAndIsNotEmpty(inputFile) || len(templates) == 0 {
-		return nil
-	}
-
-	logger.Debug("Running Nuclei command", "input", inputFile, "output", outputFile, "templates", templates)
-
-	args := []string{
-		"-l", inputFile,
-		"-o", outputFile,
-		"-silent",
-		"-no-color",
-		"-retries", "2",
-		"-timeout", "10",
-		"-bulk-size", "50",
-		"-concurrency", "25",
-		"-t", strings.Join(templates, ","),
-	}
-
-	cmd := exec.CommandContext(ctx, "nuclei", args...)
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err != nil {
-		return fmt.Errorf("nuclei execution failed: %w\nStderr: %s", err, stderr.String())
-	}
-	return nil
-}
-
-func runNikto(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
-	if !fileExistsAndIsNotEmpty(inputFile) {
-		logger.Warn("Input file for Nikto does not exist or is empty, skipping.", "file", inputFile)
-		return nil
-	}
-
-	logger.Info("Executing external nikto command in parallel. Ensure it's installed in your system's PATH.")
-
-	hosts, err := readLines(inputFile)
-	if err != nil {
-		return fmt.Errorf("failed to read hosts from input file for Nikto: %w", err)
-	}
-	if len(hosts) == 0 {
-		logger.Info("No hosts found in input file for Nikto, skipping scan.", "file", inputFile)
-		return nil
-	}
-
-	outputFileHandle, err := os.OpenFile(outputFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open nikto output file: %w", err)
-	}
-	defer outputFileHandle.Close()
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	concurrencyLimit := make(chan struct{}, config.Cfg.Engine.MaxParallelTasks)
-
-	for _, host := range hosts {
-		host := host
-		if host == "" {
-			continue
-		}
-
-		select {
-		case <-ctx.Done():
-			logger.Info("Nikto scan cancelled by context", "error", ctx.Err())
-			return ctx.Err()
-		case concurrencyLimit <- struct{}{}:
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer func() { <-concurrencyLimit }()
-				
-				logger.Debug("Running Nikto scan", "host", host)
-
-				parsedURL, err := url.Parse(host)
-				if err != nil {
-					logger.Warn("Failed to parse host URL for Nikto, skipping", "host", host, "error", err)
-					return
-				}
-
-				args := []string{
-					"-h", parsedURL.Hostname(),
-					"-Format", "txt",
-					"-Tuning", "1", // Focus on interesting findings
-				}
-				if parsedURL.Scheme == "https" {
-					args = append(args, "-ssl")
-				}
-				if port := parsedURL.Port(); port != "" {
-					args = append(args, "-p", port)
-				}
-
-				cmd := exec.CommandContext(ctx, "nikto", args...)
-
-				var stdoutBuf, stderrBuf bytes.Buffer
-				cmd.Stdout = &stdoutBuf
-				cmd.Stderr = &stderrBuf
-
-				err = cmd.Run()
-				if err != nil {
-					// Nikto often exits with code 1 for non-fatal errors (e.g., connection issues).
-					// We log it but don't treat it as a hard failure to allow results to be saved.
-					logger.Warn("Nikto scan for host completed with an error", "host", host, "error", err, "stderr", stderrBuf.String())
-				}
-
-				mu.Lock()
-				defer mu.Unlock()
-				if stdoutBuf.Len() > 0 {
-					_, _ = outputFileHandle.WriteString(fmt.Sprintf("--- Nikto Scan for %s ---\n", host))
-					_, _ = outputFileHandle.Write(stdoutBuf.Bytes())
-					_, _ = outputFileHandle.WriteString("\n")
-				}
-				if stderrBuf.Len() > 0 {
-					_, _ = outputFileHandle.WriteString(fmt.Sprintf("--- Nikto Errors for %s ---\n", host))
-					_, _ = outputFileHandle.Write(stderrBuf.Bytes())
-					_, _ = outputFileHandle.WriteString("\n")
-				}
-			}()
-		}
-	}
-
-	wg.Wait()
-	return nil
-}
-
-func runBBot(ctx context.Context, target, outputFile string, logger *slog.Logger) error {
-	logger.Info("Executing external bbot command. Ensure it's installed and configured.")
-
-	profile := "recon-light"
-	if config.Cfg.Recon.BBot.Profile != "" {
-		profile = config.Cfg.Recon.BBot.Profile
-	}
-	logger.Info("Using bbot profile", "profile", profile)
-
-	cmd := exec.CommandContext(ctx, "bbot", "-t", target, "-f", profile, "-o", outputFile, "-y")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("bbot execution failed: %w", err)
-	}
-	logger.Info("BBot scan completed", "output_file", outputFile)
-	return nil
+	logger.Info("Successfully created resolvers file from built-in list.", "path", outputFile)
 }
 
 type FaviconResult struct {
@@ -1461,12 +1434,12 @@ type FaviconResult struct {
 }
 
 func runFaviconHash(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
-	if !fileExistsAndIsNotEmpty(inputFile) {
+	if !FileExistsAndIsNotEmpty(inputFile) {
 		logger.Warn("Input file for favicon analysis does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
 	
-	hosts, err := readLines(inputFile)
+	hosts, err := ReadLines(inputFile)
 	if err != nil {
 		return fmt.Errorf("failed to read hosts for favicon analysis: %w", err)
 	}
@@ -1484,12 +1457,12 @@ func runFaviconHash(ctx context.Context, inputFile, outputFile string, logger *s
 			defer wg.Done()
 			defer func() { <-concurrencyLimit }()
 
-			faviconURLs := findFaviconURLs(ctx, h, logger)
-			if len(faviconURLs) == 0 {
+			faviconURLs, err := findFaviconURLs(ctx, h, logger)
+			if err != nil {
+				logger.Warn("Failed to find favicon URLs", "host", h, "error", err)
 				return
 			}
-
-			faviconURL := faviconURLs[0]
+			faviconURL := faviconURLs[0] // Use the first found URL
 
 			req, err := http.NewRequestWithContext(ctx, "GET", faviconURL, nil)
 			if err != nil {
@@ -1538,10 +1511,13 @@ func runFaviconHash(ctx context.Context, inputFile, outputFile string, logger *s
 	return nil
 }
 
-func findFaviconURLs(ctx context.Context, hostURL string, logger *slog.Logger) []string {
+func findFaviconURLs(ctx context.Context, hostURL string, logger *slog.Logger) ([]string, error) {
 	var foundURLs []string
 
-	defaultFaviconURL, _ := url.Parse(hostURL)
+	defaultFaviconURL, err := url.Parse(hostURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse host URL for favicon: %w", err)
+	}
 	defaultFaviconURL.Path = "/favicon.ico"
 	foundURLs = append(foundURLs, defaultFaviconURL.String())
 
@@ -1551,16 +1527,18 @@ func findFaviconURLs(ctx context.Context, hostURL string, logger *slog.Logger) [
 	)
 	c.SetClient(&http.Client{Timeout: 10 * time.Second})
 
-	c.OnHTML("link[rel~='icon']", func(e *colly.HTMLElement) { // This function needs logger too
+	c.OnHTML("link[rel~='icon']", func(e *colly.HTMLElement) {
 		href := e.Attr("href")
 		absoluteURL := e.Request.AbsoluteURL(href)
 		foundURLs = append(foundURLs, absoluteURL)
 	})
 
-	_ = c.Visit(hostURL)
+	if err := c.Visit(hostURL); err != nil {
+		return nil, err
+	}
 	c.Wait()
 
-	return foundURLs
+	return foundURLs, nil
 }
 
 type CVEResult struct {
@@ -1597,8 +1575,9 @@ type HttpxTechInfo struct {
 	Tech []string `json:"tech"`
 }
 
-func runCVESearch(ctx context.Context, techFile, outputFile string, logger *slog.Logger) error {
-	if !fileExistsAndIsNotEmpty(techFile) {
+// RunCVESearch procura por CVEs conhecidas com base nas tecnologias detectadas.
+func RunCVESearch(ctx context.Context, techFile, outputFile string, logger *slog.Logger) error {
+	if !FileExistsAndIsNotEmpty(techFile) {
 		logger.Warn("Technology detection file does not exist or is empty, skipping CVE search.", "file", techFile)
 		return nil
 	}
@@ -1698,12 +1677,12 @@ func runCVESearch(ctx context.Context, techFile, outputFile string, logger *slog
 	return nil
 }
 
-func runFfuf(ctx context.Context, inputFile, wordlist, outputDir string, logger *slog.Logger) error {
-	if !fileExistsAndIsNotEmpty(inputFile) {
+func RunFfuf(ctx context.Context, inputFile, wordlist, outputDir string, rateLimit int, logger *slog.Logger) error {
+	if !FileExistsAndIsNotEmpty(inputFile) {
 		logger.Warn("Input file for ffuf does not exist or is empty, skipping.", "file", inputFile)
 		return nil
 	}
-	if wordlist == "" || !fileExistsAndIsNotEmpty(wordlist) {
+	if wordlist == "" || !FileExistsAndIsNotEmpty(wordlist) {
 		logger.Warn("Fuzzing wordlist not configured or file not found, skipping ffuf.", "file", wordlist)
 		return nil // This function needs logger too
 	}
@@ -1714,7 +1693,7 @@ func runFfuf(ctx context.Context, inputFile, wordlist, outputDir string, logger 
 
 	logger.Info("Executing external ffuf command. Ensure it's installed in your system's PATH.")
 
-	hosts, err := readLines(inputFile)
+	hosts, err := ReadLines(inputFile)
 	if err != nil {
 		return fmt.Errorf("failed to read hosts for ffuf: %w", err)
 	}
@@ -1728,18 +1707,27 @@ func runFfuf(ctx context.Context, inputFile, wordlist, outputDir string, logger 
 		go func(h string) {
 			defer wg.Done()
 			defer func() { <-concurrencyLimit }()
-
-			sanitizedHost := sanitizeTargetForPath(h)
+			
+			sanitizedHost := SanitizeTargetForPath(h)
 			hostOutputFile := filepath.Join(outputDir, fmt.Sprintf("%s.json", sanitizedHost))
 
 			logger.Debug("Running ffuf scan", "host", h)
-			cmd := exec.CommandContext(ctx, "ffuf",
+			args := []string{
 				"-w", wordlist,
 				"-u", h+"/FUZZ",
 				"-o", hostOutputFile,
 				"-of", "json",
-				"-silent",
-			)
+				"-ac", // Ativa a autocalibração de filtros para ignorar lixo.
+				"-noninteractive", // Garante que não haverá prompts.
+				"-maxtime", "300", // Limita a execução a 5 minutos por host.
+			}
+
+			if rateLimit > 0 {
+				logger.Info("Applying rate limit to ffuf.", "host", h, "rate", rateLimit)
+				args = append(args, "-rate", fmt.Sprintf("%d", rateLimit))
+			}
+
+			cmd := exec.CommandContext(ctx, config.GetToolPath("ffuf"), args...)
 
 			var stderr bytes.Buffer
 			cmd.Stderr = &stderr
@@ -1755,8 +1743,130 @@ func runFfuf(ctx context.Context, inputFile, wordlist, outputDir string, logger 
 	return nil
 }
 
+func runDirsearch(ctx context.Context, inputFile, wordlist, outputDir string, rateLimit int, logger *slog.Logger) error {
+	if !CommandExists("dirsearch") {
+		logger.Warn("dirsearch is not installed or not executable, skipping.", "tool", "dirsearch", "help", "Install with: pip3 install dirsearch")
+		return nil // Não é um erro fatal, apenas pula a ferramenta.
+	}
+	if !FileExistsAndIsNotEmpty(inputFile) {
+		logger.Warn("Input file for dirsearch does not exist or is empty, skipping.", "file", inputFile)
+		return nil
+	}
+	if wordlist == "" || !FileExistsAndIsNotEmpty(wordlist) {
+		logger.Warn("Fuzzing wordlist not configured or file not found, skipping dirsearch.", "file", wordlist)
+		return nil
+	}
+
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create dirsearch output directory: %w", err)
+	}
+
+	hosts, err := ReadLines(inputFile)
+	if err != nil {
+		return fmt.Errorf("failed to read hosts for dirsearch: %w", err)
+	}
+
+	var wg sync.WaitGroup
+	concurrencyLimit := make(chan struct{}, config.Cfg.Engine.MaxParallelTasks)
+
+	for _, host := range hosts {
+		wg.Add(1)
+		concurrencyLimit <- struct{}{}
+		go func(h string) {
+			defer wg.Done()
+			defer func() { <-concurrencyLimit }()
+
+			sanitizedHost := SanitizeTargetForPath(h)
+			// dirsearch lida com a extensão do arquivo, então apenas fornecemos o caminho base.
+			hostOutputFile := filepath.Join(outputDir, sanitizedHost)
+
+			logger.Debug("Running dirsearch scan", "host", h)
+			args := []string{
+				"-u", h,
+				"-w", wordlist,
+				"--output=" + hostOutputFile, // Formato do dirsearch
+				"--format=json",
+				"--force-recursive",
+				"--random-user-agents",
+			}
+
+			if rateLimit > 0 {
+				// dirsearch usa --rate
+				logger.Info("Applying rate limit to dirsearch.", "host", h, "rate", rateLimit)
+				args = append(args, fmt.Sprintf("--rate=%d", rateLimit))
+			}
+
+			// dirsearch é um script python, então pode ser necessário chamá-lo com 'python3'
+			// A função GetToolPath deve retornar o executável correto.
+			if _, err := ExecuteCommand(ctx, logger, "dirsearch", args...); err != nil {
+				logger.Warn("dirsearch scan for host failed", "host", h, "error", err)
+			}
+		}(host)
+	}
+
+	wg.Wait()
+	return nil
+}
+
+func runWafw00f(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
+	if !CommandExists("wafw00f") {
+		logger.Error("wafw00f is not installed or not executable. Please check your PATH and permissions.", "tool", "wafw00f")
+		return fmt.Errorf("wafw00f not found or not executable")
+	}
+	if !FileExistsAndIsNotEmpty(inputFile) {
+		logger.Warn("Input file for wafw00f does not exist or is empty, skipping.", "file", inputFile)
+		return nil
+	}
+
+	logger.Info("Starting wafw00f to detect Web Application Firewalls", "input", inputFile)
+
+	args := []string{
+		"-i", inputFile,
+		"-o", outputFile,
+		"-f", "json", // Formato de saída JSON para fácil parsing futuro
+		"-a", // Procura por todos os WAFs, não para no primeiro encontrado
+	}
+
+	if _, err := ExecuteCommand(ctx, logger, "wafw00f", args...); err != nil {
+		// wafw00f pode falhar em alguns hosts, mas não queremos que isso quebre a cadeia.
+		logger.Warn("wafw00f execution finished with an error, but this might be acceptable.", "error", err)
+	}
+
+	return nil
+}
+
+func runPortScan(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
+	if !FileExistsAndIsNotEmpty(inputFile) {
+		logger.Warn("Input file for port scan does not exist or is empty, skipping.", "file", inputFile)
+		return nil
+	}
+
+	// Extrai apenas os hostnames, pois o naabu não lida bem com URLs completas.
+	hosts, err := ReadLines(inputFile)
+	if err != nil {
+		return fmt.Errorf("failed to read hosts for port scan: %w", err)
+	}
+	hostnames := make(map[string]struct{})
+	for _, h := range hosts {
+		if u, err := url.Parse(h); err == nil {
+			hostnames[u.Hostname()] = struct{}{}
+		}
+	}
+
+	var uniqueHostnames []string
+	for hn := range hostnames {
+		uniqueHostnames = append(uniqueHostnames, hn)
+	}
+
+	logger.Info("Starting port scan on live hosts", "host_count", len(uniqueHostnames))
+	args := []string{"-host", strings.Join(uniqueHostnames, ","), "-o", outputFile, "-silent", "-top-ports", "1000"}
+
+	_, err = ExecuteCommand(ctx, logger, "naabu", args...)
+	return err // Retorna o erro para ser tratado pela etapa.
+}
+
 func getCSPDomains(ctx context.Context, liveSubdomainsFile, mainTarget string, logger *slog.Logger) ([]string, error) {
-	if !fileExistsAndIsNotEmpty(liveSubdomainsFile) {
+	if !FileExistsAndIsNotEmpty(liveSubdomainsFile) {
 		logger.Warn("Live subdomains file for CSP analysis does not exist or is empty, skipping.", "file", liveSubdomainsFile)
 		return nil, nil
 	}
@@ -1826,18 +1936,18 @@ func getCSPDomains(ctx context.Context, liveSubdomainsFile, mainTarget string, l
 	return result, scanner.Err()
 }
 
-func runHTMLAnalysis(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
-	if !fileExistsAndIsNotEmpty(inputFile) {
-		logger.Warn("Input file for HTML analysis does not exist or is empty, skipping.", "file", inputFile)
+func runHTMLAnalysis(state *reconState) error {
+	if !FileExistsAndIsNotEmpty(state.liveSubdomainsFile) {
+		state.logger.Warn("Input file for HTML analysis does not exist or is empty, skipping.", "file", state.liveSubdomainsFile)
 		return nil
 	}
 	
-	hosts, err := readLines(inputFile)
+	hosts, err := ReadLines(state.liveSubdomainsFile)
 	if err != nil {
 		return fmt.Errorf("failed to read hosts for HTML analysis: %w", err)
 	}
 
-	file, err := os.Create(outputFile)
+	file, err := os.Create(state.htmlFindingsFile)
 	if err != nil {
 		return fmt.Errorf("failed to create HTML findings file: %w", err)
 	}
@@ -1847,73 +1957,79 @@ func runHTMLAnalysis(ctx context.Context, inputFile, outputFile string, logger *
 
 	var mu sync.Mutex
 
+	// Diretório para salvar os arquivos HTML para análise posterior.
+	htmlFilesPath := filepath.Join(state.resultsPath, "html_files")
+	if err := os.MkdirAll(htmlFilesPath, 0755); err != nil {
+		return fmt.Errorf("failed to create directory for HTML files: %w", err)
+	}
+
+	// --- Etapa 1: Coletar e salvar os arquivos HTML ---
 	c := colly.NewCollector(
 		colly.Async(true),
-		colly.MaxDepth(2),
+		colly.MaxDepth(1), // Profundidade 1 é suficiente para a página inicial de cada host.
 	)
 
 	_ = c.Limit(&colly.LimitRule{
 		DomainGlob:  "*",
 		Parallelism: config.Cfg.Engine.MaxParallelTasks,
+		Delay:       50 * time.Millisecond,
 	})
 
-	c.OnResponse(func(r *colly.Response) { // This function needs logger too
-		saveAndAnalyzeHTML(r, writer, &mu, logger)
+	c.OnResponse(func(r *colly.Response) {
+		sanitizedFilename := SanitizeTargetForPath(r.Request.URL.String()) + ".html"
+		filePath := filepath.Join(htmlFilesPath, sanitizedFilename)
+		if err := os.WriteFile(filePath, r.Body, 0644); err != nil {
+			state.logger.Error("Failed to save HTML file", "path", filePath, "error", err)
+		} else {
+			state.logger.Debug("Saved HTML file for analysis", "path", filePath)
+		}
 	})
 
 	for _, host := range hosts {
 		_ = c.Visit(host)
 	}
-
 	c.Wait()
-	return nil
+	state.logger.Info("HTML file collection finished. Starting analysis.")
+
+	// --- Etapa 2: Analisar os arquivos HTML salvos ---
+	return filepath.Walk(htmlFilesPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".html") {
+			content, readErr := os.ReadFile(path)
+			if readErr != nil {
+				state.logger.Warn("Failed to read saved HTML file for analysis", "path", path, "error", readErr)
+				return nil // Continua para o próximo arquivo
+			}
+
+			htmlContent := string(content)
+			secrets, endpoints := AnalyzeContentForPatterns(htmlContent)
+
+			if len(secrets) > 0 || len(endpoints) > 0 {
+				mu.Lock()
+				defer mu.Unlock()
+				_, _ = writer.WriteString(fmt.Sprintf("--- Findings in HTML from file: %s ---\n", path))
+				if len(secrets) > 0 {
+					_, _ = writer.WriteString(fmt.Sprintf("  [SECRETS] %v\n", secrets))
+				}
+				if len(endpoints) > 0 {
+					_, _ = writer.WriteString(fmt.Sprintf("  [ENDPOINTS] %v\n", endpoints))
+				}
+				_, _ = writer.WriteString("\n")
+			}
+		}
+		return nil
+	})
 }
 
-func saveAndAnalyzeHTML(r *colly.Response, secretsWriter *bufio.Writer, mu *sync.Mutex, logger *slog.Logger) {
-	urlStr := r.Request.URL.String()
-	sanitizedFilename := sanitizeTargetForPath(urlStr) + ".html"
-
-	htmlFilesPath := filepath.Join("results", sanitizeTargetForPath(r.Request.URL.Hostname()), "recon", "html_files")
-	if err := os.MkdirAll(htmlFilesPath, 0755); err != nil {
-		logger.Error("Failed to create directory for HTML files", "path", htmlFilesPath, "error", err)
-		return
-	}
-
-	filePath := filepath.Join(htmlFilesPath, sanitizedFilename)
-	if err := os.WriteFile(filePath, r.Body, 0644); err != nil {
-		logger.Error("Failed to save HTML file", "path", filePath, "error", err)
-	} else { // This function needs logger too
-		logger.Info("Saved HTML file", "path", filePath)
-	}
-
-	htmlContent := string(r.Body)
-	for _, pattern := range secretPatterns {
-		matches := pattern.FindAllString(htmlContent, -1)
-		if len(matches) > 0 {
-			mu.Lock()
-			_, _ = secretsWriter.WriteString(fmt.Sprintf("[SECRET] HTML URL: %s, Pattern: %s, Matches: %v\n", urlStr, pattern.String(), matches))
-			mu.Unlock()
-			logger.Info("Found potential secret in HTML file", "url", urlStr, "pattern", pattern.String(), "matches", matches)
-		}
-	}
-	for _, pattern := range endpointPatterns {
-		matches := pattern.FindAllString(htmlContent, -1)
-		if len(matches) > 0 {
-			mu.Lock()
-			_, _ = secretsWriter.WriteString(fmt.Sprintf("[ENDPOINT] HTML URL: %s, Pattern: %s, Matches: %v\n", urlStr, pattern.String(), matches))
-			mu.Unlock()
-			logger.Info("Found potential endpoint in HTML file", "url", urlStr, "pattern", pattern.String(), "matches", matches)
-		}
-	}
-}
-
-func generateReconSummary(state *reconState) (string, error) {
+func generateReconSummary(state *reconState) (string, []string, error) {
 	var summary strings.Builder
 	summary.WriteString(fmt.Sprintf("✅ **Recon Summary for: %s**\n\n", state.target))
 
 	// Helper to count lines in a file
 	countLines := func(path string) int {
-		if !fileExistsAndIsNotEmpty(path) {
+		if !FileExistsAndIsNotEmpty(path) {
 			return 0
 		}
 		file, err := os.Open(path)
@@ -1932,11 +2048,33 @@ func generateReconSummary(state *reconState) (string, error) {
 	summary.WriteString(fmt.Sprintf("• **Subdomains Found:** %d\n", countLines(state.subdomainsFile)))
 	summary.WriteString(fmt.Sprintf("• **Live Hosts:** %d\n", countLines(state.liveSubdomainsFile)))
 	summary.WriteString(fmt.Sprintf("• **URLs Discovered:** %d\n", countLines(state.urlsFile)))
-	summary.WriteString(fmt.Sprintf("• **Nuclei Findings:** %d\n", countLines(state.nucleiScanFile)))
-	summary.WriteString(fmt.Sprintf("• **OWASP Top 10 Findings:** %d\n", countLines(state.owaspScanFile)))
-	summary.WriteString(fmt.Sprintf("• **Basic Vulnerabilities (XSS/SQLi):** %d\n", countLines(state.vulnerabilityFile)))
 
-	summary.WriteString(fmt.Sprintf("\n*Full results are saved in:* `%s`", state.resultsPath))
+	summary.WriteString(fmt.Sprintf("\n*Full results are saved in:* `%s`", state.resultsPath)) // This function needs logger too
 
-	return summary.String(), nil
+	// Lista de arquivos de resultado para anexar
+	resultFiles := []string{
+		state.subdomainsFile,
+		state.liveSubdomainsFile,
+		state.urlsFile,
+		state.jsFindingsFile,
+		state.htmlFindingsFile,
+	}
+
+	return summary.String(), resultFiles, nil
+}
+
+// CountLines é uma função auxiliar para contar linhas em um arquivo.
+func CountLines(path string) int {
+	if !FileExistsAndIsNotEmpty(path) {
+		return 0
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	count := 0
+	for scanner.Scan() { count++ }
+	return count
 }
