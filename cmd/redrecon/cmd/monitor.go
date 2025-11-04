@@ -16,25 +16,13 @@ var (
 	monitorFrequency string
 )
 
-// MonitorCmd represents the monitor command
 var MonitorCmd = &cobra.Command{
 	Use:   "monitor <target>",
 	Short: "Continuously monitors targets for new vulnerabilities",
-	Long: `The 'monitor' command runs scans on a schedule to detect new vulnerabilities
-or newly exposed assets for one or more targets.
-
-The target can be a single domain, a file containing a list of targets (txt, json, xml),
-or a directory containing multiple result files. The tool will parse and normalize
-all inputs to execute the monitoring on each valid target found.
-
-Notifications for new findings are sent via the Discord webhook configured in 'config.yaml'.
-
+	Long: `The 'monitor' command runs scans on a schedule to detect new vulnerabilities or newly exposed assets for one or more targets. The target can be a single domain, a file containing a list of targets (txt, json, xml), or a directory containing multiple result files. The tool will parse and normalize all inputs to execute the monitoring on each valid target found. Notifications for new findings are sent via the Discord webhook configured in 'config.yaml'.
 Usage Examples:
-  # Monitor a single target with the default frequency (6h)
-  redrecon monitor example.com
-
-  # Monitor all targets from a file with a 12-hour frequency
-  redrecon monitor -f 12h targets.txt`,
+redrecon monitor example.com
+redrecon monitor -f 12h targets.txt`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
 			monitorTarget = args[0]
@@ -68,7 +56,6 @@ Usage Examples:
 			targetsToScan = []string{monitorTarget}
 		}
 
-		// Agrupa todos os alvos sob seu domínio raiz para evitar monitoramento duplicado.
 		rootTargets := make(map[string]struct{})
 		for _, t := range targetsToScan {
 			rootDomain := target.GetRootDomain(t)
@@ -80,7 +67,6 @@ Usage Examples:
 			uniqueRootTargets = append(uniqueRootTargets, root)
 		}
 
-		// A função Start já é um processo de longa duração, então não precisa de um loop aqui.
 		monitor.Start(uniqueRootTargets, frequency)
 		return nil
 	},

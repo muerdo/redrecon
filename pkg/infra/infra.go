@@ -12,7 +12,6 @@ import (
 	"redrecon/pkg/tools"
 )
 
-// infraState armazena o estado e os caminhos para uma operação de varredura de infraestrutura.
 type infraState struct {
 	ctx         context.Context
 	target      string
@@ -20,7 +19,6 @@ type infraState struct {
 	tempDir     string
 	logger      *slog.Logger
 
-	// Arquivos de resultados específicos para infra
 	nmapFile         string
 	enum4linuxNGFile string
 	cmeSmbFile       string
@@ -29,13 +27,12 @@ type infraState struct {
 	dnsEnumFile      string
 	cloudEnumFile    string
 	sslScanFile      string
-	rpcScanFile      string // Novo: Arquivo para resultados da varredura RPC
-	snmpScanFile     string // Novo: Arquivo para resultados da varredura SNMP
+	rpcScanFile      string
+	snmpScanFile     string
 }
 
 type infraStep func(state *infraState) error
 
-// StartInfra inicia o fluxo de trabalho de varredura de infraestrutura.
 func StartInfra(taskIdentifier, target string, skipSteps []string, logger *slog.Logger) (string, []string, error) {
 	logger.Info("Starting infrastructure scan", "target", target)
 
@@ -86,7 +83,6 @@ func StartInfra(taskIdentifier, target string, skipSteps []string, logger *slog.
 		"snmpscan":     stepRunNmapSnmpScan,
 	}
 
-	// Ordem de execução aprimorada para uma varredura completa
 	executionOrder := []string{"dnsenum", "nmap", "cloudenum", "sslscan", "rpcscan", "snmpscan", "enum4linux", "crackmapexec", "sipscan"}
 
 	for _, stepName := range executionOrder {
@@ -104,23 +100,19 @@ func StartInfra(taskIdentifier, target string, skipSteps []string, logger *slog.
 		state.logger.Info(fmt.Sprintf("--- Starting: %s ---", stepName))
 		if err := stepFunc(state); err != nil {
 			state.logger.Error("An infra step failed", "step", stepName, "error", err)
-			// Decide se o erro é fatal ou se o fluxo deve continuar
 		}
 	}
 
 	state.logger.Info("Infrastructure scan process completed.")
 
-	// Gerar sumário e coletar arquivos de resultados
 	summary, files := generateInfraSummary(state)
 
 	return summary, files, nil
 }
 
-// stepRunNmap executa o nmap no alvo.
 func stepRunNmap(state *infraState) error {
 	state.logger.Info("Executing full nmap scan. This may take a while...", "target", state.target)
 
-	// Varredura completa de todas as portas TCP, com detecção de versão, scripts padrão e salvando em XML.
 	err := tools.RunNmap(state.ctx, state.target, state.nmapFile, state.logger,
 		"-p-", "-sV", "-sC", "-T4", "-oX", state.nmapFile)
 
@@ -132,11 +124,9 @@ func stepRunNmap(state *infraState) error {
 	return nil
 }
 
-// stepRunCrackMapExec executa o crackmapexec para enumerar serviços comuns.
 func stepRunCrackMapExec(state *infraState) error {
 	state.logger.Info("--- Starting: Service Enumeration (CrackMapExec) ---")
 
-	// Enumeração SMB
 	state.logger.Info("Running CrackMapExec for SMB enumeration")
 	smbOutput, err := tools.RunCrackMapExec(state.ctx, "smb", state.target, state.logger)
 	if err != nil {
@@ -147,7 +137,6 @@ func stepRunCrackMapExec(state *infraState) error {
 		}
 	}
 
-	// Enumeração SSH
 	state.logger.Info("Running CrackMapExec for SSH enumeration")
 	sshOutput, err := tools.RunCrackMapExec(state.ctx, "ssh", state.target, state.logger)
 	if err != nil {
@@ -162,37 +151,32 @@ func stepRunCrackMapExec(state *infraState) error {
 	return nil
 }
 
-// stepRunSipScan executa uma varredura em busca de servidores SIP (VoIP).
 func stepRunSipScan(state *infraState) error {
 	state.logger.Info("--- Starting: SIP/VoIP Scanning (svmap) ---")
 	return tools.RunSipScan(state.ctx, state.target, state.sipScanFile, state.logger)
 }
 
-// stepRunDnsEnum executa a enumeração de DNS.
 func stepRunDnsEnum(state *infraState) error {
 	state.logger.Info("--- Starting: DNS Enumeration (dnsx) ---")
 	return tools.RunDnsxInfra(state.ctx, state.target, state.dnsEnumFile, state.logger)
 }
 
-// stepRunCloudEnum executa a enumeração de serviços em nuvem.
 func stepRunCloudEnum(state *infraState) error {
 	state.logger.Info("--- Starting: Cloud Service Enumeration (cloudenum) ---")
 	return tools.RunCloudEnum(state.ctx, state.target, state.cloudEnumFile, state.logger)
 }
 
-// stepRunSslScan executa a varredura de SSL/TLS.
 func stepRunSslScan(state *infraState) error {
 	state.logger.Info("--- Starting: SSL/TLS Configuration Scan (sslscan) ---")
 	return tools.RunSslScan(state.ctx, state.target, state.sslScanFile, state.logger)
 }
 
-// stepRunEnum4linuxNG executa a ferramenta enum4linux-ng.
 func stepRunEnum4linuxNG(state *infraState) error {
 	state.logger.Info("--- Starting: SMB Enumeration (enum4linux-ng) ---")
 	err := tools.RunEnum4linuxNG(state.ctx, state.target, state.enum4linuxNGFile, state.logger)
 	if err != nil {
 		state.logger.Warn("enum4linux-ng scan failed, but continuing.", "error", err)
-		return err // Retorna o erro, mas não é fatal para o fluxo principal.
+		return err
 	}
 	if utils.FileExistsAndIsNotEmpty(state.enum4linuxNGFile) {
 		state.logger.Info("SMB enumeration completed", "output_file", state.enum4linuxNGFile)
@@ -202,7 +186,6 @@ func stepRunEnum4linuxNG(state *infraState) error {
 	return nil
 }
 
-// stepRunNmapRpcScan executa uma varredura nmap focada em RPC.
 func stepRunNmapRpcScan(state *infraState) error {
 	state.logger.Info("--- Starting: RPC Scanning (nmap) ---")
 	err := tools.RunNmapRpcScan(state.ctx, state.target, state.rpcScanFile, state.logger)
@@ -212,10 +195,8 @@ func stepRunNmapRpcScan(state *infraState) error {
 	return nil
 }
 
-// stepRunNmapSnmpScan executa uma varredura nmap focada em SNMP.
 func stepRunNmapSnmpScan(state *infraState) error {
 	state.logger.Info("--- Starting: SNMP Scanning (nmap) ---")
-	// Usa a função genérica RunNmap com scripts SNMP
 	err := tools.RunNmap(state.ctx, state.target, state.snmpScanFile, state.logger,
 		"-sU", "-p", "161", "--script=snmp-info,snmp-enum-shares", "-oN", state.snmpScanFile)
 	if err != nil {
@@ -224,32 +205,27 @@ func stepRunNmapSnmpScan(state *infraState) error {
 	return nil
 }
 
-// generateInfraSummary gera um sumário dos resultados do scan de infraestrutura.
 func generateInfraSummary(state *infraState) (string, []string) {
 	var summary strings.Builder
 	summary.WriteString(fmt.Sprintf("✅ **Infra Scan Summary for: %s**\n\n", state.target))
 
 	files := []string{}
 
-	// DNS Enum Results
 	if utils.FileExistsAndIsNotEmpty(state.dnsEnumFile) {
 		summary.WriteString(fmt.Sprintf("• **DNS Enumeration:** Completed. Results saved to `%s`.\n", filepath.Base(state.dnsEnumFile)))
 		files = append(files, state.dnsEnumFile)
 	}
 
-	// Cloud Enum Results
 	if utils.FileExistsAndIsNotEmpty(state.cloudEnumFile) {
 		summary.WriteString(fmt.Sprintf("• **Cloud Enumeration:** Completed. Results saved to `%s`.\n", filepath.Base(state.cloudEnumFile)))
 		files = append(files, state.cloudEnumFile)
 	}
 
-	// SSL Scan Results
 	if utils.FileExistsAndIsNotEmpty(state.sslScanFile) {
 		summary.WriteString(fmt.Sprintf("• **SSL/TLS Scan:** Completed. Results saved to `%s`.\n", filepath.Base(state.sslScanFile)))
 		files = append(files, state.sslScanFile)
 	}
 
-	// Nmap Results
 	if utils.FileExistsAndIsNotEmpty(state.nmapFile) {
 		summary.WriteString(fmt.Sprintf("• **Nmap Full Scan:** Completed. Results saved to `%s`.\n", filepath.Base(state.nmapFile)))
 		files = append(files, state.nmapFile)
@@ -257,25 +233,21 @@ func generateInfraSummary(state *infraState) (string, []string) {
 		summary.WriteString("• **Nmap Scan:** No results found.\n")
 	}
 
-	// CrackMapExec SMB Results
 	if utils.FileExistsAndIsNotEmpty(state.cmeSmbFile) {
 		summary.WriteString(fmt.Sprintf("• **CrackMapExec (SMB):** Completed. Results saved to `%s`.\n", filepath.Base(state.cmeSmbFile)))
 		files = append(files, state.cmeSmbFile)
 	}
 
-	// CrackMapExec SSH Results
 	if utils.FileExistsAndIsNotEmpty(state.cmeSshFile) {
 		summary.WriteString(fmt.Sprintf("• **CrackMapExec (SSH):** Completed. Results saved to `%s`.\n", filepath.Base(state.cmeSshFile)))
 		files = append(files, state.cmeSshFile)
 	}
 
-	// SIP Scan Results
 	if utils.FileExistsAndIsNotEmpty(state.sipScanFile) {
 		summary.WriteString(fmt.Sprintf("• **SIP/VoIP Scan:** Completed. Results saved to `%s`.\n", filepath.Base(state.sipScanFile)))
 		files = append(files, state.sipScanFile)
 	}
 
-	// Enum4linux-ng Results
 	if utils.FileExistsAndIsNotEmpty(state.enum4linuxNGFile) {
 		summary.WriteString(fmt.Sprintf("• **SMB Enumeration (enum4linux-ng):** Completed. Results saved to `%s`.\n", filepath.Base(state.enum4linuxNGFile)))
 		files = append(files, state.enum4linuxNGFile)
@@ -283,13 +255,11 @@ func generateInfraSummary(state *infraState) (string, []string) {
 		summary.WriteString("• **SMB Enumeration (enum4linux-ng):** No results found.\n")
 	}
 
-	// RPC Scan Results
 	if utils.FileExistsAndIsNotEmpty(state.rpcScanFile) {
 		summary.WriteString(fmt.Sprintf("• **RPC Scan (nmap):** Completed. Results saved to `%s`.\n", filepath.Base(state.rpcScanFile)))
 		files = append(files, state.rpcScanFile)
 	}
 
-	// SNMP Scan Results
 	if utils.FileExistsAndIsNotEmpty(state.snmpScanFile) {
 		summary.WriteString(fmt.Sprintf("• **SNMP Scan (nmap):** Completed. Results saved to `%s`.\n", filepath.Base(state.snmpScanFile)))
 		files = append(files, state.snmpScanFile)

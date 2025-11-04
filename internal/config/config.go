@@ -18,7 +18,7 @@ type Config struct {
 	Engine    EngineConfig    `yaml:"engine"`
 	Recon     ReconConfig     `yaml:"recon"`
 	Wordlists WordlistsConfig `yaml:"wordlists"`
-	AI        AIConfig        `yaml:"ai"` // Adicionado: Configurações para IA
+	AI        AIConfig        `yaml:"ai"`
 	ToolPaths ToolPathsConfig `yaml:"tool_paths"`
 }
 type DiscordConfig struct {
@@ -53,16 +53,15 @@ type EngineConfig struct {
 	
 }
 
-// AIConfig contém as configurações para os modelos de IA.
 type AIConfig struct {
 	Enabled        bool    `yaml:"enabled"`
-	Provider       string  `yaml:"provider"` // Ex: "openai", "deepseek"
+	Provider       string  `yaml:"provider"`
 	OpenAIAPIKey   string  `yaml:"openai_api_key"`
-	DeepSeekAPIKey string `yaml:"deepseek_api_key"` // Chave da API DeepSeek
-	Model          string  `yaml:"model"`    // Ex: "gpt-4o", "deepseek-chat"
+	DeepSeekAPIKey string `yaml:"deepseek_api_key"`
+	Model          string  `yaml:"model"`
 	Temperature    float64 `yaml:"temperature"`
-	BaseURL        string  `yaml:"base_url"` // URL base da API (opcional)
-	APIKey         string  `yaml:"api_key"`  // Chave de API genérica (fallback)
+	BaseURL        string  `yaml:"base_url"`
+	APIKey         string  `yaml:"api_key"`
 }
 type WordlistsConfig struct {
     Subdomains string `mapstructure:"subdomains"`
@@ -71,14 +70,14 @@ type WordlistsConfig struct {
 
 type ToolPathsConfig struct {
 	Subfinder    string `yaml:"subfinder"`
-	Httpx        string `yaml:"httpx"` // Mantido como está para consistência com o nome do binário
+	Httpx        string `yaml:"httpx"`
 	Shuffledns   string `yaml:"shuffledns"`
-	Katana       string `yaml:"katana"` // Mantido como está
-	Nuclei       string `yaml:"nuclei"` // Mantido como está
-	Nikto        string `yaml:"nikto"` // Mantido como está
-	Ffuf         string `yaml:"ffuf"` // Mantido como está
+	Katana       string `yaml:"katana"`
+	Nuclei       string `yaml:"nuclei"`
+	Nikto        string `yaml:"nikto"`
+	Ffuf         string `yaml:"ffuf"`
 	Bbot         string `yaml:"bbot"`
-	Dirsearch    string `yaml:"dirsearch"` // Mantido como está
+	Dirsearch    string `yaml:"dirsearch"`
 	Sublist3r    string `yaml:"sublist3r"`
 	Amass        string `yaml:"amass"`
 	Wafw00f      string `yaml:"wafw00f"`
@@ -87,7 +86,7 @@ type ToolPathsConfig struct {
 	Feroxbuster  string `yaml:"feroxbuster"`
 	Paramspider  string `yaml:"paramspider"`
 	Dnsx         string `yaml:"dnsx"`
-	Naabu        string `yaml:"naabu"` // Mantido como está
+	Naabu        string `yaml:"naabu"`
 	Crackmapexec string `yaml:"crackmapexec"`
 	Svmap        string `yaml:"svmap"`
 	Cloudenum    string `yaml:"cloudenum"`
@@ -109,28 +108,25 @@ type BBotConfig struct {
 	Profile string `mapstructure:"profile"`
 }
 
-// WAFProfile contém os parâmetros de evasão para um WAF específico.
 type WAFProfile struct {
 	RateLimit   int    `yaml:"rate_limit"`
 	Concurrency int    `yaml:"concurrency"`
 	Nuclei      string `yaml:"nuclei,omitempty"`
 	Ffuf        string `yaml:"ffuf,omitempty"`
 	Nikto       string `yaml:"nikto,omitempty"`
-	ProxyFile   string `yaml:"proxy_file,omitempty"` // Caminho para um arquivo com uma lista de proxies
+	ProxyFile   string `yaml:"proxy_file,omitempty"`
 }
 
 type WAFConfig struct {
 	Enabled        bool                  `yaml:"enabled"`
 	DefaultProfile WAFProfile            `yaml:"default_profile"`
-	DefaultProxies []string              `yaml:"default_proxies,omitempty"` // Lista de proxies padrão para usar como fallback.
+	DefaultProxies []string              `yaml:"default_proxies,omitempty"`
 	Profiles       map[string]WAFProfile `yaml:"profiles"`
 }
 var Cfg *Config
 
-// GetTempDir retorna o diretório temporário configurado pelo usuário ou o padrão do sistema.
 func GetTempDir() string {
 	if Cfg.Engine.TempDir != "" {
-		// Garante que o diretório base exista.
 		if err := os.MkdirAll(Cfg.Engine.TempDir, 0755); err != nil {
 			slog.Error("Failed to create custom temporary directory, falling back to system default", "path", Cfg.Engine.TempDir, "error", err)
 			return os.TempDir()
@@ -140,12 +136,7 @@ func GetTempDir() string {
 	return os.TempDir()
 }
 
-// GetProxyFile retorna o caminho para um arquivo de proxy.
-// Se o usuário especificou um `proxy_file` no perfil, ele será usado.
-// Caso contrário, se houver proxies padrão, um arquivo temporário será criado.
-// Retorna o caminho do arquivo e um booleano indicando se um arquivo foi criado/encontrado.
 func GetProxyFile(profile WAFProfile, tempDir string) (string, bool) {
-	// Prioridade 1: Usar o arquivo de proxy definido pelo usuário no perfil.
 	if profile.ProxyFile != "" {
 		if _, err := os.Stat(profile.ProxyFile); err == nil {
 			slog.Debug("Using user-defined proxy file from profile.", "path", profile.ProxyFile)
@@ -154,10 +145,9 @@ func GetProxyFile(profile WAFProfile, tempDir string) (string, bool) {
 		slog.Warn("User-defined proxy file not found, falling back to defaults.", "path", profile.ProxyFile)
 	}
 
-	// Prioridade 2: Usar a lista de proxies padrão da configuração.
 	if len(Cfg.Engine.WAF.DefaultProxies) > 0 {
 		slog.Debug("Creating temporary proxy file from default proxy list.")
-		proxyFile, err := os.CreateTemp(tempDir, "default-proxies-*.txt") // tempDir é passado como argumento
+		proxyFile, err := os.CreateTemp(tempDir, "default-proxies-*.txt")
 		if err != nil {
 			slog.Error("Failed to create temporary default proxy file", "error", err)
 			return "", false
@@ -175,22 +165,15 @@ func GetProxyFile(profile WAFProfile, tempDir string) (string, bool) {
 	return "", false
 }
 
-// fileExistsAndIsExecutable verifica se um caminho existe e se é um arquivo executável.
 func fileExistsAndIsExecutable(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false
 	}
-	// Verifica se é um arquivo regular e se tem permissão de execução para o usuário, grupo ou outros.
 	return !info.IsDir() && (info.Mode()&0111 != 0)
 }
 
-// GetToolPath localiza uma ferramenta seguindo uma ordem de prioridade:
-// 1. Caminho explícito no config.yaml.
-// 2. Caminho encontrado na variável de ambiente PATH do sistema.
-// 3. Busca em diretórios comuns (incluindo /mnt/dexter_storage/tools).
 func GetToolPath(toolName string) string {
-	// 1. Verifica se há um caminho personalizado no config.yaml
 	var customPath string
 	switch toolName {
 	case "subfinder":
@@ -207,7 +190,7 @@ func GetToolPath(toolName string) string {
 		customPath = Cfg.ToolPaths.Ffuf
 	case "bbot":
 		customPath = Cfg.ToolPaths.Bbot
-	case "dirsearch": // Dirsearch ainda é usado no stepRunFuzzing
+	case "dirsearch":
 		customPath = Cfg.ToolPaths.Dirsearch
 	case "sublist3r":
 		customPath = Cfg.ToolPaths.Sublist3r
@@ -245,22 +228,18 @@ func GetToolPath(toolName string) string {
 		slog.Warn("Tool path specified in config.yaml not found or not executable, falling back to search", "tool", toolName, "path", customPath)
 	}
 
-	// 2. Procura no PATH do sistema
 	if path, err := exec.LookPath(toolName); err == nil {
 		slog.Debug("Found tool in system PATH", "tool", toolName, "path", path)
 		return path
 	}
 
-	// 3. Procura em diretórios comuns
 	homeDir, _ := os.UserHomeDir()
 	commonDirs := []string{
-		"/mnt/dexter_storage/tools", // Diretório de ferramentas customizado
+		"/mnt/dexter_storage/tools",
 		"/usr/local/bin",
 		"/usr/bin",
 	}
 	if homeDir != "" {
-		// Adiciona o diretório padrão de binários do Go, que é o local de instalação
-		// de ferramentas como httpx, katana, etc.
 		commonDirs = append(commonDirs, fmt.Sprintf("%s/go/bin", homeDir))
 	}
 
@@ -272,7 +251,6 @@ func GetToolPath(toolName string) string {
 		}
 	}
 
-	// Se não encontrar em lugar nenhum, retorna o nome original e deixa o `exec` falhar.
 	return toolName
 }
 func LoadConfig() (err error) {
@@ -300,29 +278,21 @@ func LoadConfig() (err error) {
 	return
 }
 
-// UpdateToolPathsInConfig encontra as ferramentas no PATH e atualiza o config.yaml.
 func UpdateToolPathsInConfig() {
-	// Carrega a configuração atual para obter a lista de ferramentas e o estado atual.
-	// A função LoadConfig() já deve existir no seu pacote.
 	LoadConfig()
 
-	// Lista de ferramentas a serem verificadas (a mesma do comando 'check').
 	toolsToCheck := []string{
 		"subfinder", "httpx", "katana", "nuclei", "nikto", "ffuf",
 		"bbot", "dirsearch", "naabu", "sublist3r", "amass", "wafw00f",
 		"dalfox", "assetfinder", "feroxbuster", "paramspider", "dnsx", "jsbeautifier-go",
 	}
 
-	updated := false // Não é necessário verificar se Cfg.ToolPaths é nil, pois é uma struct.
+	updated := false
 
 	slog.Info("Buscando ferramentas no sistema para atualizar config.yaml...")
 	for _, tool := range toolsToCheck {
-		// Usa exec.LookPath para encontrar o caminho absoluto da ferramenta no PATH.
-		// GetToolPath já faz uma busca mais abrangente, mas para o --update-config,
-		// queremos encontrar o caminho *real* no sistema para persistir.
 		path, err := exec.LookPath(tool)
 		if err != nil {
-			// A ferramenta não foi encontrada no PATH, informa ao usuário.
 			slog.Warn("Ferramenta não encontrada no PATH", "tool", tool)
 			continue
 		}
@@ -330,7 +300,6 @@ func UpdateToolPathsInConfig() {
 		// Ferramenta encontrada, adiciona ao mapa.
 		absPath, _ := filepath.Abs(path)
 		
-		// Atualiza o campo correspondente na struct ToolPathsConfig
 		switch tool {
 		case "subfinder": Cfg.ToolPaths.Subfinder = absPath
 		case "httpx": Cfg.ToolPaths.Httpx = absPath
@@ -353,8 +322,6 @@ func UpdateToolPathsInConfig() {
 		case "svmap": Cfg.ToolPaths.Svmap = absPath
 		case "cloudenum": Cfg.ToolPaths.Cloudenum = absPath
 		case "sslscan": Cfg.ToolPaths.Sslscan = absPath
-		// Para outras ferramentas que não têm um campo ToolPaths dedicado, elas não serão adicionadas aqui.
-		// Se necessário, ToolPathsConfig precisaria ser expandida.
 		}
 		slog.Info("Ferramenta encontrada e caminho adicionado ao config.yaml", "tool", tool, "path", absPath)
 		updated = true
@@ -365,8 +332,7 @@ func UpdateToolPathsInConfig() {
 		return
 	}
 
-	// Reescreve o arquivo config.yaml com os novos caminhos.
-	configPath := "config.yaml" // Assume que o config está no mesmo diretório.
+	configPath := "config.yaml"
 	data, err := yaml.Marshal(&Cfg)
 	if err != nil {
 		slog.Error("Erro ao serializar o arquivo de configuração", "error", err)

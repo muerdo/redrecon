@@ -28,7 +28,6 @@ var (
 	botID string
 )
 
-// Command Handlers to be set by the main application to break import cycles.
 var (
 	StartMonitorFunc func(targets []string, frequency time.Duration)
 	StartReconFunc   func(taskIdentifier, rootTarget string, initialSubdomains, skipSteps []string, skipAnalysis, followRedirects, isInteractive, useResolvedForScan bool, logger *slog.Logger) (string, []string, bool, error)
@@ -36,31 +35,22 @@ var (
 	StartInfraFunc   func(taskIdentifier, target string, skipSteps []string, logger *slog.Logger) (string, []string, error)
 	StartScanFunc    func(ctx context.Context, taskIdentifier string, skipSteps, onlySteps []string, isAggressive, isInteractive bool, logger *slog.Logger) (string, []string, error)
 	StartWebFunc     func(taskIdentifier, target string, depth int, logger *slog.Logger) (string, []string, error)
-	StartAPIFunc     func(taskIdentifier string, skipSteps []string, logger *slog.Logger) (string, []string, error) // Novo: Função para o modo API
+	StartAPIFunc     func(taskIdentifier string, skipSteps []string, logger *slog.Logger) (string, []string, error)
 )
 
-// IsDiscordBotEnabled verifica se o bot do Discord está habilitado na configuração.
 func IsDiscordBotEnabled() bool {
-	// Esta função assume que você tem uma maneira de verificar se o bot está ativo.
-	// Por exemplo, verificando se o token do bot está definido.
 	return config.Cfg.Engine.Discord.Token != ""
 }
 
-// GetDiscordChannelID retorna o ID do canal para enviar mensagens.
-// Isso pode ser um valor fixo ou lido da configuração.
 func GetDiscordChannelID() string {
-	// Supondo que você adicione um campo `ChannelID` à sua configuração do Discord.
 	return config.Cfg.Engine.Discord.DefaultChannelID
 }
 
-// messageCreate will be called every time a new message is sent in a channel the bot has access to.
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix string) {
-	// Ignore messages from the bot itself
 	if m.Author.ID == botID || !strings.HasPrefix(m.Content, prefix) {
 		return
 	}
 
-	// Parse the command
 	args := strings.Fields(m.Content[len(prefix):])
 	if len(args) == 0 {
 		s.ChannelMessageSend(m.ChannelID, "Comando inválido. Use `!help` para ver os comandos.")
@@ -70,11 +60,10 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 	command := strings.ToLower(args[0])
 	cmdArgs := args[1:]
 
-	go func() { // Run command in a goroutine to not block the bot
-		// Cria um logger que escreve diretamente no canal do Discord para esta execução.
+	go func() {
 		discordWriter := NewDiscordWriter(s, m.ChannelID)
 		discordLogger := slog.New(slog.NewTextHandler(discordWriter, nil))
-		defer discordWriter.Flush() // Garante que qualquer log restante no buffer seja enviado.
+		defer discordWriter.Flush()
 
 		switch command {
 		case "monitor":
@@ -83,9 +72,8 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 				return
 			}
 			
-			// Extrai alvos e frequência. A frequência é o último argumento se for uma duração válida.
 			var targets []string
-			freqStr := "6h" // Frequência padrão
+			freqStr := "6h"
 			lastArg := cmdArgs[len(cmdArgs)-1]
 			
 			if _, err := time.ParseDuration(lastArg); err == nil {
@@ -100,9 +88,9 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 				return
 			}
 
-			frequency, _ := time.ParseDuration(freqStr) // O erro já foi verificado
+			frequency, _ := time.ParseDuration(freqStr)
 			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Iniciando monitoramento para: `%s` com frequência de %s", strings.Join(targets, ", "), frequency))
-			if StartMonitorFunc != nil { // StartMonitorFunc ainda usa slog.Default() para logs internos, mas a notificação inicial vai para o Discord.
+			if StartMonitorFunc != nil {
 				go StartMonitorFunc(targets, frequency)
 				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("✅ Monitoramento iniciado para `%d` alvo(s).", len(targets)))
 			}
@@ -112,28 +100,26 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 				return
 			}
 			
-			var searchTermParts []string // Usar um slice para coletar partes do termo de busca
+			var searchTermParts []string
 			var targetScope string
 			var listOnly, useRegex bool
 
-			// Itera sobre os argumentos para encontrar flags e o termo de busca
 			for i := 0; i < len(cmdArgs); i++ {
 				arg := cmdArgs[i]
 				switch arg {
-				case "-t", "--target": // Suporta -t e --target
+				case "-t", "--target":
 					if i+1 < len(cmdArgs) {
 						targetScope = cmdArgs[i+1]
-						i++ // Pula o próximo argumento, pois já foi consumido
+						i++
 					} else {
 						s.ChannelMessageSend(m.ChannelID, "Erro: A flag `-t` ou `--target` requer um valor para o alvo.")
 						return
 					}
-				case "-l", "--list-only": // Suporta -l e --list-only
+				case "-l", "--list-only":
 					listOnly = true
-				case "-r", "--regex": // Suporta -r e --regex
+				case "-r", "--regex":
 					useRegex = true
 				default:
-					// Coleta argumentos que não são flags como partes do termo de busca
 					searchTermParts = append(searchTermParts, arg)
 				}
 			}
@@ -150,7 +136,6 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 			}
 			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🔎 Procurando por `%s` em %s...", searchTerm, searchScopeMsg))
 			
-			// A função de busca já está preparada para não usar cores fora do terminal
 			output, err := search.ExecuteSearch(searchTerm, targetScope, listOnly, useRegex)
 			if err != nil {
 				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ A busca falhou: %v", err))
@@ -167,7 +152,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 				})
 			}
 
-		case "run": // Comando unificado 'run'
+		case "run":
 			if len(cmdArgs) < 1 {
 				s.ChannelMessageSend(m.ChannelID, "Uso: `!run <alvo> [--recon-skip <steps>] [--scan-skip <steps>] [--scan-only <steps>] [--aggressive] [--skip-analysis] [--force-scan]`")
 				return
@@ -183,9 +168,8 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 				forceScan         bool
 			)
 
-			runTarget = cmdArgs[0] // Assume o primeiro argumento como o alvo
+			runTarget = cmdArgs[0]
 
-			// Parser básico de flags para o comando !run
 			for i := 1; i < len(cmdArgs); i++ {
 				arg := cmdArgs[i]
 				switch arg {
@@ -236,7 +220,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 			}
 
 			var targetArg string
-			depth := 2 // Profundidade padrão
+			depth := 2
 			for i := 0; i < len(cmdArgs); i++ {
 				arg := cmdArgs[i]
 				switch arg {
@@ -324,7 +308,6 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 				return
 			}
 			targetArg := cmdArgs[0]
-			// A flag --partial é implícita, a função getTargetResults sempre busca o que existe.
 			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🔎 Buscando resultados para o alvo `%s`...", targetArg))
 
 			summary, files, err := getTargetResults(targetArg)
@@ -374,16 +357,13 @@ func (b *bot) handleInfraCommand(s *discordgo.Session, m *discordgo.MessageCreat
 	// ... (implementação futura, se necessário)
 }
 
-type bot struct {
-	// ... (campos futuros, se necessário)
-}
+type bot struct{}
 
 func NewBot() *bot {
 	return &bot{}
 }
 
 
-// getTargetResults localiza e lista todos os arquivos de resultado para um determinado alvo.
 func getTargetResults(target string) (string, []string, error) {
 	sanitizedTarget := utils.SanitizeTargetForPath(target)
 	targetResultsPath := filepath.Join("results", sanitizedTarget)
@@ -397,7 +377,6 @@ func getTargetResults(target string) (string, []string, error) {
 		if err != nil {
 			return err
 		}
-		// Adiciona apenas arquivos, não diretórios.
 		if !info.IsDir() {
 			files = append(files, path)
 		}
@@ -413,25 +392,17 @@ func getTargetResults(target string) (string, []string, error) {
 	return summary, files, nil
 }
 
-// SendSummaryAndFiles envia a mensagem de sumário e anexa os arquivos de resultado.
 func SendSummaryAndFiles(s *discordgo.Session, channelID, summary string, files []string) {
-	// Se a sessão 's' for nula (quando chamada de fora do bot), não podemos enviar mensagens.
-	// Isso é um placeholder. Uma solução melhor seria usar um cliente Discord global.
 	if s == nil || channelID == "" {
 		slog.Warn("Discord session or channel ID is not available. Cannot send results.")
 		return
 	}
-	// 1. Envia a mensagem de sumário primeiro.
 	_, err := s.ChannelMessageSend(channelID, summary)
 	if err != nil {
 		slog.Error("Failed to send summary message to Discord", "error", err)
-		// Continua mesmo se o sumário falhar, para tentar enviar os arquivos.
 	}
 
-	// 2. Itera sobre cada arquivo de resultado e envia seu conteúdo.
-	// Envia cada arquivo como um anexo separado para melhor clareza e para evitar limites de tamanho de mensagem.
 	for _, filePath := range files {
-		// Pula arquivos que não existem ou estão vazios.
 		stat, err := os.Stat(filePath)
 		if os.IsNotExist(err) || (err == nil && stat.Size() == 0) {
 			continue
@@ -444,7 +415,6 @@ func SendSummaryAndFiles(s *discordgo.Session, channelID, summary string, files 
 		}
 		defer file.Close()
 
-		// Envia o arquivo como um anexo.
 		_, err = s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
 			Content: fmt.Sprintf("📄 **Resultado do arquivo: `%s`**", filepath.Base(filePath)),
 			Files: []*discordgo.File{
@@ -460,7 +430,6 @@ func SendSummaryAndFiles(s *discordgo.Session, channelID, summary string, files 
 	}
 }
 
-// SendWebhookNotification envia uma notificação via webhook, ideal para processos de background como o 'chain'.
 func SendWebhookNotification(title, description string, color int, fields []types.EmbedField) {
 	webhookURL := config.Cfg.Engine.Discord.WebhookURL
 	if webhookURL == "" {
@@ -469,7 +438,7 @@ func SendWebhookNotification(title, description string, color int, fields []type
 	}
 
 	if color == 0 {
-		color = 0x4E5D94 // Cor padrão do RedRecon
+		color = 0x4E5D94
 	}
 
 	payload := types.WebhookPayload{
@@ -495,19 +464,18 @@ func SendWebhookNotification(title, description string, color int, fields []type
 	slog.Info("Sent notification to Discord webhook.")
 }
 
-// SendVulnerabilityNotification envia uma notificação de vulnerabilidade para o webhook configurado.
 func SendVulnerabilityNotification(target string, finding types.NucleiFinding) {
 	webhookURL := config.Cfg.Engine.Discord.WebhookURL
 	if webhookURL == "" {
 		return
 	}
 
-	color := 0xDBA800 // Amarelo para severidade média (padrão)
+	color := 0xDBA800
 	switch strings.ToUpper(finding.Info.Severity) {
 	case "CRITICAL":
-		color = 0x992D22 // Vermelho escuro
+		color = 0x992D22
 	case "HIGH":
-		color = 0xE53935 // Vermelho
+		color = 0xE53935
 	case "LOW":
 		color = 0x43A047 // Verde
 	case "INFO":
@@ -535,20 +503,15 @@ func SendVulnerabilityNotification(target string, finding types.NucleiFinding) {
 	http.Post(webhookURL, "application/json", bytes.NewBuffer(payloadBytes))
 }
 
-// StartBot initializes and starts the Discord bot.
 func StartBot(token, prefix string) {
-	// Create a new Discord session using the provided bot token.
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
 		slog.Error("error creating Discord session,", "error", err)
 		return
 	}
 
-	// Define um cliente HTTP customizado com um timeout maior para lidar com redes lentas.
-	// Aumentado para 60 segundos para acomodar redes mais lentas ou com maior latência.
 	dg.Client = &http.Client{Timeout: 60 * time.Second}
 
-	// Get the bot's user ID
 	slog.Info("Connecting to Discord and verifying bot token...")
 	u, err := dg.User("@me")
 	if err != nil {
@@ -557,27 +520,22 @@ func StartBot(token, prefix string) {
 	}
 	botID = u.ID
 
-	// Register the messageCreate func as a callback for MessageCreate events.
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
 		messageCreate(s, m, prefix)
 	})
 
-	// We only care about receiving message events.
 	dg.Identify.Intents = discordgo.IntentsGuildMessages
 
-	// Open a websocket connection to Discord and begin listening.
 	err = dg.Open()
 	if err != nil {
 		slog.Error("error opening connection,", "error", err)
 		return
 	}
 
-	// Wait here until CTRL-C or other term signal is received.
 	slog.Info("Bot is now running. Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
 
-	// Cleanly close down the Discord session.
 	dg.Close()
 }

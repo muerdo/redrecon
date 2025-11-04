@@ -3,21 +3,20 @@ package tools
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"os/exec" // Adicionado: Importa o pacote exec
+	"log/slog" // Adicionado: Importa o pacote bytes
+	"os/exec"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"bytes" // Adicionado: Importa o pacote bytes
+	"bytes"
 
 	"redrecon/internal/config"
 	"redrecon/pkg/utils"
 	"gopkg.in/yaml.v2"
 )
 
-// RunSubfinder executa a ferramenta subfinder para enumeração de subdomínios.
 func RunSubfinder(ctx context.Context, target, tempDir string, logger *slog.Logger) (string, error) {
 	logger.Info("Executing external command: subfinder", "target", target)
 
@@ -35,7 +34,6 @@ func RunSubfinder(ctx context.Context, target, tempDir string, logger *slog.Logg
 		return "", fmt.Errorf("subfinder not found in PATH")
 	}
 
-	// Gera um arquivo de configuração temporário para o subfinder com as chaves de API.
 	configPath, err := createSubfinderConfig(tempDir)
 	if err != nil {
 		logger.Warn("Could not create subfinder API config, proceeding without API keys.", "error", err)
@@ -46,27 +44,21 @@ func RunSubfinder(ctx context.Context, target, tempDir string, logger *slog.Logg
 
 	output, err := utils.ExecuteCommand(ctx, logger, "subfinder", args...)
 	if err != nil {
-		// A verificação de chaves de API é feita aqui, pois a falta delas é a causa mais comum de falha.
-		// Se o subfinder falhar, informa ao usuário sobre a necessidade crítica das chaves.
 		keys := config.Cfg.APIKeys
 		if keys.Chaos == "" && keys.SecurityTrails == "" && keys.Shodan == "" && keys.Github == "" && keys.Censys == "" {
 			logger.Error("CRITICAL: Nenhuma chave de API encontrada em config.yaml. O Subfinder requer chaves de API para uma enumeração de subdomínios eficaz. Por favor, atualize sua configuração.")
 		}
-		// Retorna a saída mesmo em caso de erro (pode conter resultados parciais) junto com o erro original.
 		return output, fmt.Errorf("subfinder execution failed: %w", err)
 	}
 	return output, nil
 }
 
-// RunAmass executa a ferramenta amass para enumeração passiva de subdomínios.
 func RunAmass(ctx context.Context, target, tempDir string, logger *slog.Logger) (string, error) {
 	logger.Info("Executing external command: amass", "target", target)
 	if !utils.CommandExists("amass") {
 		return "", fmt.Errorf("amass not found in PATH")
 	}
 
-	// O amass pode ser lento, então definimos um timeout razoável.
-	// Usamos o modo passivo para evitar qualquer tráfego direto para o alvo.
 	args := []string{
 		"enum",
 		"-passive",
@@ -78,38 +70,32 @@ func RunAmass(ctx context.Context, target, tempDir string, logger *slog.Logger) 
 	return utils.ExecuteCommand(ctx, logger, "amass", args...)
 }
 
-// RunSublist3r executa a ferramenta sublist3r.
 func RunSublist3r(ctx context.Context, target, tempDir string, logger *slog.Logger) (string, error) {
 	logger.Info("Executing external command: sublist3r", "target", target)
 	if !utils.CommandExists("sublist3r") {
 		return "", fmt.Errorf("sublist3r not found in PATH")
 	}
 
-	// Cria um arquivo de saída temporário para o sublist3r.
-	// Isso evita que o banner da ferramenta polua o stdout.
 	outputFile, err := os.CreateTemp(tempDir, "sublist3r_*.txt")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temporary file for sublist3r: %w", err)
 	}
 	defer os.Remove(outputFile.Name())
 	outputFileName := outputFile.Name()
-	outputFile.Close() // Fecha o handle para que o sublist3r possa escrever nele.
+	outputFile.Close()
 
 	args := []string{
 		"-d", target,
-		"-o", outputFileName, // Salva a saída no arquivo temporário.
-		"-t", "10", // Define um número de threads.
-		"-v", // Modo verboso para depuração, mas a saída vai para o arquivo.
+		"-o", outputFileName,
+		"-t", "10",
+		"-v",
 	}
 
-	// Executa o comando, mas ignora o stdout, pois a saída está no arquivo.
 	_, err = utils.ExecuteCommand(ctx, logger, "sublist3r", args...)
 	if err != nil {
-		// Mesmo com erro, tenta ler o arquivo, pois pode haver resultados parciais.
 		logger.Warn("Sublist3r finished with an error, but attempting to read partial results.", "error", err)
 	}
 
-	// Lê os resultados do arquivo de saída e retorna como uma string.
 	content, readErr := os.ReadFile(outputFileName)
 	if readErr != nil {
 		return "", fmt.Errorf("failed to read sublist3r output file: %w", readErr)
@@ -118,22 +104,19 @@ func RunSublist3r(ctx context.Context, target, tempDir string, logger *slog.Logg
 	return string(content), nil
 }
 
-// RunAssetfinder executa a ferramenta assetfinder.
 func RunAssetfinder(ctx context.Context, target, tempDir string, logger *slog.Logger) (string, error) {
 	logger.Info("Executing external command: assetfinder", "target", target)
 	if !utils.CommandExists("assetfinder") {
 		return "", fmt.Errorf("assetfinder not found in PATH. Install with: go install -v github.com/tomnomnom/assetfinder@latest")
 	}
 
-	// Assetfinder imprime para stdout, então capturamos a saída e a escrevemos no arquivo.
 	args := []string{
-		"--subs-only", // Garante que apenas subdomínios sejam retornados
+		"--subs-only",
 		target,
 	}
 
 	return utils.ExecuteCommand(ctx, logger, "assetfinder", args...)
 }
-// createSubfinderConfig gera um arquivo provider-config.yaml temporário.
 func createSubfinderConfig(tempDir string) (string, error) {
 	providerConfig := make(map[string][]string)
 	keys := config.Cfg.APIKeys
@@ -172,7 +155,6 @@ func createSubfinderConfig(tempDir string) (string, error) {
 	}
 	defer configFile.Close()
 
-	// Subfinder espera um arquivo YAML, não JSON.
 	encoder := yaml.NewEncoder(configFile)
 	err = encoder.Encode(providerConfig)
 	if err != nil {
@@ -182,7 +164,6 @@ func createSubfinderConfig(tempDir string) (string, error) {
 	return configFile.Name(), nil
 }
 
-// RunHttpx executa a ferramenta httpx para validação de hosts e descoberta de tecnologias.
 func RunHttpx(ctx context.Context, inputFile, outputFile, liveHostsOutputFile, tempDir string, followRedirects bool, ports string, techDetectOnly bool, logger *slog.Logger) error {
 	logger.Info("Executing external command: httpx", "input", inputFile)
 	if !utils.CommandExists("httpx") {
@@ -193,8 +174,6 @@ func RunHttpx(ctx context.Context, inputFile, outputFile, liveHostsOutputFile, t
 		return nil
 	}
 
-	// Pré-processa a lista de entrada para garantir que contenha apenas hostnames,
-	// o que é o formato ideal para usar com as flags -probe e -ports.
 	processedInputFile, err := utils.PreprocessForHttpxProbe(inputFile, tempDir, logger)
 	if err != nil {
 		return fmt.Errorf("failed to preprocess targets for httpx probe mode: %w", err)
@@ -202,33 +181,26 @@ func RunHttpx(ctx context.Context, inputFile, outputFile, liveHostsOutputFile, t
 	defer os.Remove(processedInputFile)
 
 	args := []string{
-		"-l", processedInputFile, // Usa o arquivo pré-processado
+		"-l", processedInputFile,
 		"-threads", "50",
-		"-silent", // Usa -silent para que o stdout contenha apenas as URLs vivas.
+		"-silent",
 		"-timeout", "10",
 		"-tmp-dir", tempDir,
 	}
 
 	if techDetectOnly {
-		// Modo de detecção de tecnologia: salva a saída JSON no arquivo de saída.
 		args = append(args, "-o", outputFile, "-json", "-status-code", "-title", "-tech-detect")
 	} else {
-		// Modo de descoberta de hosts vivos: a saída vai para stdout.
-		// A flag -random-agent foi removida, pois é o comportamento padrão agora.
 		if followRedirects {
 			args = append(args, "-follow-redirects")
 		}
 	}
 
-	// CORREÇÃO: Adiciona um conjunto explícito de portas web comuns E a flag -probe.
-	// Isso garante que, mesmo que o portscan não encontre nada, o httpx ainda tentará as portas mais óbvias.
 	args = append(args, "-ports", "80,81,443,591,8000,8008,8080,8081,8443,8880,8888")
-	args = append(args, "-probe") // Mantém o probe para verificar as portas padrão (80, 443) de forma eficiente.
+	args = append(args, "-probe")
 
-	// Executa o comando e captura o stdout, que conterá a lista de hosts vivos.
 	output, err := utils.ExecuteCommand(ctx, logger, "httpx", args...)
 
-	// Se não estivermos no modo de detecção de tecnologia, a saída (stdout) são os hosts vivos.
 	if !techDetectOnly && err == nil && output != "" {
 		if writeErr := os.WriteFile(liveHostsOutputFile, []byte(output), 0644); writeErr != nil {
 			logger.Error("Failed to write live hosts output file from httpx stdout", "error", writeErr)
@@ -237,7 +209,6 @@ func RunHttpx(ctx context.Context, inputFile, outputFile, liveHostsOutputFile, t
 	return err
 }
 
-// RunHttpxVulnerabilityScan executa o httpx para testes básicos de injeção.
 func RunHttpxVulnerabilityScan(ctx context.Context, inputFile, outputFile, tempDir string, logger *slog.Logger) error {
 	logger.Info("Executing external command: httpx (vulnerability scan)", "input", inputFile)
 	if !utils.CommandExists("httpx") {
@@ -248,32 +219,27 @@ func RunHttpxVulnerabilityScan(ctx context.Context, inputFile, outputFile, tempD
 		return nil
 	}
 
-	// Pré-processa o arquivo de entrada para garantir que todas as linhas sejam URLs válidas.
-	// Isso evita que o httpx falhe com "exit status 2" se encontrar entradas como "host:port".
 	processedInputFile, err := utils.PreprocessURLsForHttpx(inputFile, tempDir, logger)
 	if err != nil {
 		return fmt.Errorf("failed to preprocess URLs for httpx vulnerability scan: %w", err)
 	}
-	// Se o arquivo processado for diferente do original, removemos no final.
 	if processedInputFile != inputFile {
 		defer os.Remove(processedInputFile)
 	}
 
-	// Se após o processamento não houver URLs válidas, pulamos a etapa.
 	if !utils.FileExistsAndIsNotEmpty(processedInputFile) {
 		logger.Warn("No valid URLs found after preprocessing, skipping httpx vulnerability scan.", "original_file", inputFile)
 		return nil
 	}
 
-	// Garante que o número de threads seja um valor razoável.
 	threads := config.Cfg.Engine.MaxParallelTasks
 	if threads <= 0 {
-		threads = 25 // Define um padrão de 25 se a configuração for 0 ou negativa.
+		threads = 25
 	}
 
 	xssPayloads := `"><script>alert('XSS')</script>,'"--> </style></scRipt><scRipt>alert('XSS')</scRipt>`
 	args := []string{
-		"-l", processedInputFile, // Usa o arquivo pré-processado
+		"-l", processedInputFile,
 		"-o", outputFile,
 		"-silent", "-no-color",
 		"-threads", fmt.Sprintf("%d", threads),
@@ -285,11 +251,9 @@ func RunHttpxVulnerabilityScan(ctx context.Context, inputFile, outputFile, tempD
 	}
 
 	_, err = utils.ExecuteCommand(ctx, logger, "httpx", args...)
-	// O erro é tratado pelo chamador.
 	return err
 }
 
-// RunKatana executa a ferramenta katana para crawling de URLs.
 func RunKatana(ctx context.Context, inputFile, outputFile, tempDir string, logger *slog.Logger) error {
 	logger.Info("Executing external command: katana", "input", inputFile)
 	if !utils.CommandExists("katana") {
@@ -300,9 +264,6 @@ func RunKatana(ctx context.Context, inputFile, outputFile, tempDir string, logge
 		return nil
 	}
 
-	// Adiciona uma etapa de pré-processamento para garantir que todas as entradas para o Katana sejam URLs válidas.
-	// Isso evita o erro "exit status 2" se o arquivo de entrada contiver apenas domínios sem esquema.
-	// Esta lógica está aqui para garantir que seja sempre aplicada, mesmo quando chamada de diferentes fluxos.
 	processedInputFile, err := utils.PreprocessURLsForHttpx(inputFile, tempDir, logger)
 	if err != nil {
 		return fmt.Errorf("failed to preprocess URLs for katana: %w", err)
@@ -312,12 +273,12 @@ func RunKatana(ctx context.Context, inputFile, outputFile, tempDir string, logge
 	}
 
 	args := []string{
-		"-list", processedInputFile, // Usa o arquivo pré-processado
+		"-list", processedInputFile,
 		"-output", outputFile,
 		"-silent",
 		"-depth", "3",
-		"-field-scope", "rdn", // Mantém o escopo para subdomínios e domínios raiz
-		"-max-response-size", "2097152", // Flag atualizada para limitar o tamanho do corpo da resposta
+		"-field-scope", "rdn",
+		"-max-response-size", "2097152",
 		"-timeout", "15",
 		"-retry", "1",
 		"-concurrency", "10",
@@ -326,11 +287,9 @@ func RunKatana(ctx context.Context, inputFile, outputFile, tempDir string, logge
 	}
 
 	_, err = utils.ExecuteCommand(ctx, logger, "katana", args...)
-	// O erro é tratado pelo chamador.
 	return err
 }
 
-// RunNuclei executa a ferramenta nuclei para varredura de vulnerabilidades.
 func RunNuclei(ctx context.Context, inputFile, outputFile, tempDir string, templates []string, profile config.WAFProfile, useDefaultConcurrency bool, logger *slog.Logger) error {
 	logger.Info("Executing external command: nuclei", "input", inputFile)
 	if !utils.CommandExists("nuclei") {
@@ -349,7 +308,6 @@ func RunNuclei(ctx context.Context, inputFile, outputFile, tempDir string, templ
 		args = append(args, "-t", t)
 	}
 
-	// Aplica o perfil de evasão
 	if useDefaultConcurrency {
 		args = append(args, "-bulk-size", "50", "-c", "25", "-random-agent")
 	} else {
@@ -365,11 +323,9 @@ func RunNuclei(ctx context.Context, inputFile, outputFile, tempDir string, templ
 	}
 
 	_, err := utils.ExecuteCommand(ctx, logger, "nuclei", args...)
-	// O erro é tratado pelo chamador.
 	return err
 }
 
-// RunNikto executa a ferramenta nikto para varredura de servidores web.
 func RunNikto(ctx context.Context, host, tempDir string, wafName string, logger *slog.Logger) (string, error) {
 	logger.Info("Executing external command: nikto", "host", host)
 	if !utils.CommandExists("nikto") {
@@ -408,7 +364,6 @@ func RunNikto(ctx context.Context, host, tempDir string, wafName string, logger 
 	return utils.ExecuteCommand(ctx, logger, "nikto", args...)
 }
 
-// RunBBot executa a ferramenta bbot.
 func RunBBot(ctx context.Context, targets []string, outputFile, tempDir, preset string, isAggressive bool, logger *slog.Logger) error {
 	logger.Info("Executing external command: bbot")
 	if !utils.CommandExists("bbot") {
@@ -437,7 +392,6 @@ func RunBBot(ctx context.Context, targets []string, outputFile, tempDir, preset 
 	return err
 }
 
-// RunFfuf executa a ferramenta ffuf para fuzzing.
 func RunFfuf(ctx context.Context, inputFile, wordlist, outputDir string, rateLimit int, logger *slog.Logger) error {
 	logger.Info("Executing external command: ffuf")
 	if !utils.CommandExists("ffuf") {
@@ -497,7 +451,6 @@ func RunFfuf(ctx context.Context, inputFile, wordlist, outputDir string, rateLim
 	return nil
 }
 
-// RunDirsearch executa a ferramenta dirsearch para fuzzing.
 func RunDirsearch(ctx context.Context, inputFile, wordlist, outputDir string, rateLimit int, logger *slog.Logger) error {
 	logger.Info("Executing external command: dirsearch")
 	if !utils.CommandExists("dirsearch") {
@@ -525,7 +478,7 @@ func RunDirsearch(ctx context.Context, inputFile, wordlist, outputDir string, ra
 			defer func() { <-concurrencyLimit }()
 
 			sanitizedHost := utils.SanitizeTargetForPath(h)
-			hostOutputFile := filepath.Join(outputDir, sanitizedHost) // dirsearch adds .json
+			hostOutputFile := filepath.Join(outputDir, sanitizedHost)
 
 			args := []string{
 				"-u", h,
@@ -551,7 +504,6 @@ func RunDirsearch(ctx context.Context, inputFile, wordlist, outputDir string, ra
 	return nil
 }
 
-// RunFeroxbuster executa a ferramenta feroxbuster para fuzzing.
 func RunFeroxbuster(ctx context.Context, inputFile, wordlist, outputDir string, rateLimit int, logger *slog.Logger) error {
 	logger.Info("Executing external command: feroxbuster")
 	if !utils.CommandExists("feroxbuster") {
@@ -586,7 +538,7 @@ func RunFeroxbuster(ctx context.Context, inputFile, wordlist, outputDir string, 
 				"--wordlist", wordlist,
 				"--output", hostOutputFile,
 				"--json",
-				"--no-state", // Evita criar arquivos .state
+				"--no-state",
 				"--random-agent",
 			}
 
@@ -601,12 +553,11 @@ func RunFeroxbuster(ctx context.Context, inputFile, wordlist, outputDir string, 
 	return nil
 }
 
-// RunGobuster executa a ferramenta gobuster para fuzzing de diretórios.
 func RunGobuster(ctx context.Context, inputFile, wordlist, outputDir string, rateLimit int, logger *slog.Logger) error {
 	logger.Info("Executing external command: gobuster")
 	if !utils.CommandExists("gobuster") {
 		logger.Warn("gobuster not found, skipping.", "help", "Install with: sudo apt install gobuster")
-		return nil // Não é um erro fatal, apenas pula a ferramenta.
+		return nil
 	}
 
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -632,13 +583,13 @@ func RunGobuster(ctx context.Context, inputFile, wordlist, outputDir string, rat
 			hostOutputFile := filepath.Join(outputDir, fmt.Sprintf("%s.txt", sanitizedHost))
 
 			args := []string{
-				"dir", // Modo de fuzzing de diretório
+				"dir",
 				"-u", h,
 				"-w", wordlist,
 				"-o", hostOutputFile,
-				"-q", // Modo silencioso
+				"-q",
 				"--no-error",
-				"-t", "50", // Threads
+				"-t", "50",
 			}
 
 			_, err := utils.ExecuteCommand(ctx, logger, "gobuster", args...)
@@ -652,7 +603,6 @@ func RunGobuster(ctx context.Context, inputFile, wordlist, outputDir string, rat
 	return nil
 }
 
-// RunDalfox executa a ferramenta dalfox para varredura de XSS.
 func RunDalfox(ctx context.Context, inputFile, outputFile, tempDir string, logger *slog.Logger) error {
 	logger.Info("Executing external command: dalfox (XSS scan)", "input", inputFile)
 	if !utils.CommandExists("dalfox") {
@@ -670,18 +620,16 @@ func RunDalfox(ctx context.Context, inputFile, outputFile, tempDir string, logge
 		"--silence",
 		"--no-color",
 		"--no-spinner",
-		"--only-custom-payload", // Foca em payloads que têm maior chance de funcionar
+		"--only-custom-payload",
 	}
 
 	_, err := utils.ExecuteCommand(ctx, logger, "dalfox", args...)
-	// Dalfox pode retornar erros se não encontrar nada, então tratamos como um aviso.
 	if err != nil {
 		logger.Warn("Dalfox scan finished with a non-zero exit code.", "error", err)
 	}
 	return nil
 }
 
-// RunParamSpider executa a ferramenta paramspider para encontrar parâmetros.
 func RunParamSpider(ctx context.Context, domain string, logger *slog.Logger) ([]string, error) {
 	logger.Info("Executing external command: paramspider", "domain", domain)
 	if !utils.CommandExists("paramspider") {
@@ -690,24 +638,18 @@ func RunParamSpider(ctx context.Context, domain string, logger *slog.Logger) ([]
 	}
 
 	args := []string{
-		"-d", domain, // Usa a flag -d para um único domínio
-		"-s", // Usar -s para modo silencioso, que é mais comum.
+		"-d", domain,
+		"-s",
 	}
 
-	// Executa o comando e captura a saída padrão (stdout).
 	stdout, err := utils.ExecuteCommand(ctx, logger, "paramspider", args...)
 	if err != nil {
-		// Não retorna o erro para não quebrar o fluxo, pois a ferramenta pode falhar se não encontrar nada.
-		// O erro já inclui o stderr, que é útil para depuração.
 		return nil, fmt.Errorf("paramspider execution failed for domain %s: %w", domain, err)
 	}
 
-	// Filtra a saída para manter apenas as URLs válidas, removendo o banner da ferramenta.
 	var validURLs []string
 	for _, line := range strings.Split(stdout, "\n") {
 		trimmedLine := strings.TrimSpace(line)
-		// Adiciona uma verificação extra para garantir que a linha contenha o domínio alvo,
-		// evitando que banners ou linhas de log sejam incluídos.
 		if (strings.HasPrefix(trimmedLine, "http://") || strings.HasPrefix(trimmedLine, "https://")) && strings.Contains(trimmedLine, domain) {
 			validURLs = append(validURLs, trimmedLine)
 		}
@@ -716,7 +658,6 @@ func RunParamSpider(ctx context.Context, domain string, logger *slog.Logger) ([]
 	return validURLs, nil
 }
 
-// RunEnum4linuxNG executa a ferramenta enum4linux-ng para enumeração SMB.
 func RunEnum4linuxNG(ctx context.Context, target, outputFile string, logger *slog.Logger) error {
 	logger.Info("Executing external command: enum4linux-ng", "target", target)
 	if !utils.CommandExists("enum4linux-ng") {
@@ -724,25 +665,19 @@ func RunEnum4linuxNG(ctx context.Context, target, outputFile string, logger *slo
 		return fmt.Errorf("enum4linux-ng not found in PATH")
 	}
 
-	// Argumentos comuns para enumeração SMB.
-	// Você pode ajustar estes argumentos conforme a necessidade.
 	args := []string{
-		"-A", // Executa todas as enumerações simples (shares, users, groups, etc.)
+		"-A",
 		target,
 	}
 
-	// enum4linux-ng escreve no stdout, então precisamos capturar e salvar.
 	output, err := utils.ExecuteCommand(ctx, logger, "enum4linux-ng", args...)
 	if err != nil {
-		// Retorna o erro, mas a função chamadora pode decidir se é fatal ou não.
 		return fmt.Errorf("enum4linux-ng execution failed: %w", err)
 	}
 
-	// Salva a saída no arquivo especificado.
 	return os.WriteFile(outputFile, []byte(output), 0644)
 }
 
-// RunWafw00f executa a ferramenta wafw00f para detecção de WAF.
 func RunWafw00f(ctx context.Context, inputFile, outputFile string, logger *slog.Logger) error {
 	logger.Info("Executing external command: wafw00f", "input", inputFile)
 	if !utils.CommandExists("wafw00f") {
@@ -763,7 +698,6 @@ func RunWafw00f(ctx context.Context, inputFile, outputFile string, logger *slog.
 	return nil
 }
 
-// RunNaabu executa a ferramenta naabu para varredura de portas.
 func RunNaabu(ctx context.Context, inputFile, outputFile, tempDir string, logger *slog.Logger) error {
 	logger.Info("Executing external command: naabu", "input", inputFile)
 	if !utils.CommandExists("naabu") {
@@ -775,34 +709,29 @@ func RunNaabu(ctx context.Context, inputFile, outputFile, tempDir string, logger
 		"-list", inputFile,
 		"-o", outputFile,
 		"-silent",
-		"-top-ports", "1000", // Ajustado para 1000 para maior compatibilidade
-		"-rate", "1000", // Ajustado para corresponder a um scan menos intenso
+		"-top-ports", "1000",
+		"-rate", "1000",
 	}
 
 	_, err := utils.ExecuteCommand(ctx, logger, "naabu", args...)
 	return err
 }
 
-// RunDnsxInfra executa o dnsx para enumeração completa de registros DNS.
 func RunDnsxInfra(ctx context.Context, target, outputFile string, logger *slog.Logger) error {
 	logger.Info("Executing external command: dnsx (infra mode)", "target", target)
 	if !utils.CommandExists("dnsx") {
 		return fmt.Errorf("dnsx not found in PATH")
 	}
 
-	// CORREÇÃO: A flag '-d' no dnsx agora requer uma wordlist (-w).
-	// Para consultar um único domínio, devemos passá-lo via stdin.
 	args := []string{
-		"-a", "-aaaa", "-cname", "-ns", "-txt", "-mx", "-soa", // Enumera todos os tipos de registro comuns
-		"-resp", // Mostra a resposta do DNS
+		"-a", "-aaaa", "-cname", "-ns", "-txt", "-mx", "-soa",
+		"-resp",
 		"-silent",
 	}
 
-	// Cria o comando e define o stdin
 	cmd := exec.CommandContext(ctx, "dnsx", args...)
 	cmd.Stdin = strings.NewReader(target)
 
-	// Executa o comando e captura a saída
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -815,7 +744,6 @@ func RunDnsxInfra(ctx context.Context, target, outputFile string, logger *slog.L
 	return os.WriteFile(outputFile, stdout.Bytes(), 0644)
 }
 
-// RunCloudEnum executa a ferramenta cloudenum.
 func RunCloudEnum(ctx context.Context, target, outputFile string, logger *slog.Logger) error {
 	toolName := "cloudenum"
 	if !utils.CommandExists(toolName) {
@@ -826,21 +754,19 @@ func RunCloudEnum(ctx context.Context, target, outputFile string, logger *slog.L
 	logger.Info("Executing external command: cloudenum", "target", target)
 
 	args := []string{
-		"-k", target, // Usa a palavra-chave do alvo para procurar em serviços de nuvem
-		"-j", outputFile, // Salva a saída em formato JSON
-		"-l", filepath.Join(filepath.Dir(outputFile), "cloudenum.log"), // Salva o log em um arquivo separado
+		"-k", target,
+		"-j", outputFile,
+		"-l", filepath.Join(filepath.Dir(outputFile), "cloudenum.log"),
 	}
 
 	_, err := utils.ExecuteCommand(ctx, logger, toolName, args...)
 	if err != nil {
-		// A ferramenta pode retornar erro se não encontrar nada, então tratamos como aviso.
 		logger.Warn("cloudenum finished with an error, but this may be expected.", "error", err)
 	}
 
 	return nil
 }
 
-// RunSslScan executa a ferramenta sslscan.
 func RunSslScan(ctx context.Context, target, outputFile string, logger *slog.Logger) error {
 	toolName := "sslscan"
 	if !utils.CommandExists(toolName) {
@@ -864,7 +790,6 @@ func RunSslScan(ctx context.Context, target, outputFile string, logger *slog.Log
 	return os.WriteFile(outputFile, []byte(output), 0644)
 }
 
-// RunNmap executa um comando nmap genérico.
 func RunNmap(ctx context.Context, target, outputFile string, logger *slog.Logger, args ...string) error {
 	logger.Info("Executing external command: nmap", "target", target)
 	if !utils.CommandExists("nmap") {
@@ -876,11 +801,9 @@ func RunNmap(ctx context.Context, target, outputFile string, logger *slog.Logger
 	return err
 }
 
-// RunCrackMapExec executa a ferramenta crackmapexec.
 func RunCrackMapExec(ctx context.Context, protocol, target string, logger *slog.Logger) (string, error) {
 	toolName := "crackmapexec"
 	if !utils.CommandExists(toolName) {
-		// Tenta com o alias 'cme'
 		toolName = "cme"
 		if !utils.CommandExists(toolName) {
 			logger.Warn("crackmapexec (or cme) not found, skipping.", "help", "Install with: sudo apt install crackmapexec")
@@ -896,7 +819,6 @@ func RunCrackMapExec(ctx context.Context, protocol, target string, logger *slog.
 	return utils.ExecuteCommand(ctx, logger, toolName, args...)
 }
 
-// RunSipScan executa a ferramenta svmap para varredura de SIP/VoIP.
 func RunSipScan(ctx context.Context, target, outputFile string, logger *slog.Logger) error {
 	toolName := "svmap"
 	if !utils.CommandExists(toolName) {
@@ -906,10 +828,8 @@ func RunSipScan(ctx context.Context, target, outputFile string, logger *slog.Log
 
 	logger.Info("Executing external command: svmap", "target", target)
 
-	// svmap pode ser barulhento, então capturamos a saída.
 	output, err := utils.ExecuteCommand(ctx, logger, toolName, target)
 	if err != nil {
-		// svmap pode retornar erro se não encontrar nada, então tratamos como aviso.
 		logger.Warn("svmap finished with an error, but this may be expected.", "error", err)
 	}
 
@@ -920,7 +840,6 @@ func RunSipScan(ctx context.Context, target, outputFile string, logger *slog.Log
 	return nil
 }
 
-// RunNmapRpcScan executa uma varredura nmap focada em RPC.
 func RunNmapRpcScan(ctx context.Context, target, outputFile string, logger *slog.Logger) error {
 	logger.Info("Executing nmap RPC scan", "target", target)
 	if !utils.CommandExists("nmap") {
@@ -928,7 +847,7 @@ func RunNmapRpcScan(ctx context.Context, target, outputFile string, logger *slog
 	}
 
 	args := []string{
-		"-sV", "-p", "111,135", // Portas comuns de RPC
+		"-sV", "-p", "111,135",
 		"--script=rpcinfo",
 		"-oN", outputFile,
 		target,

@@ -16,7 +16,6 @@ var (
 	infraSkipSteps []string
 )
 
-// InfraCmd represents the infra command
 var InfraCmd = &cobra.Command{
 	Use:   "infra <target>",
 	Short: "Performs infrastructure scanning on a target",
@@ -46,7 +45,6 @@ var InfraCmd = &cobra.Command{
 		for _, t := range targetsToScan {
 			taskIdentifier := t
 			slog.Info("===== STARTING INFRA SCAN =====", "target", t, "task_identifier", taskIdentifier)
-			// Supondo que infra.StartInfra tenha uma assinatura similar a recon.StartRecon
 			summary, _, err := infra.StartInfra(taskIdentifier, t, infraSkipSteps, logger)
 			if err != nil {
 				slog.Error("Infrastructure scan failed", "target", t, "error", err)

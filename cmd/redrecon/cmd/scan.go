@@ -19,39 +19,22 @@ var (
 	scanResultsDir string
 )
 
-// ScanCmd represents the scan command
 var ScanCmd = &cobra.Command{
 	Use:   "scan <target>",
 	Short: "Performs vulnerability scanning on a target",
-	Long: `The 'scan' command runs a series of vulnerability scanning tools against a target
-that has already been processed by the 'recon' command. It relies on the output
-of the reconnaissance phase (like live subdomains and technology information).
-This command is the second step in a typical assessment workflow.
-
+	Long: `The 'scan' command runs a series of vulnerability scanning tools against a target that has already been processed by the 'recon' command. It relies on the output of the reconnaissance phase (like live subdomains and technology information). This command is the second step in a typical assessment workflow.
 Usage Examples:
-  # Run a full vulnerability scan on a target (assumes 'recon' was run before)
-  redrecon scan example.com
-
-  # Run a scan by pointing directly to the results directory of a specific task
-  redrecon scan --results-dir results/my-task-name
-
-  # Run scans on ALL valid tasks found inside the 'results' directory
-  redrecon scan --results-dir results/
-
-  # Run the scan, but only execute the 'nuclei' and 'cvesearch' steps
-  redrecon scan example.com --only nuclei,cvesearch
-
-  # Run the scan, but skip the 'bbot' step
-  redrecon scan example.com --skip bbot
-
-  # Run an aggressive scan using bbot's 'kitchen-sink' profile
-  redrecon scan example.com --aggressive`,
+redrecon scan example.com
+redrecon scan --results-dir results/my-task-name
+redrecon scan --results-dir results/
+redrecon scan example.com --only nuclei,cvesearch
+redrecon scan example.com --skip bbot
+redrecon scan example.com --aggressive`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-		taskIdentifiers := make(map[string]struct{}) // Agora um set, pois o taskID é a única fonte da verdade.
+		taskIdentifiers := make(map[string]struct{})
 
 		if scanResultsDir != "" {
-			// Modo 2: O usuário especificou um diretório de resultados. Esta é a forma mais explícita.
 			slog.Info("Scanning based on provided results directory", "dir", scanResultsDir)
 			info, err := os.Stat(scanResultsDir)
 			if err != nil {
@@ -62,18 +45,14 @@ Usage Examples:
 				return fmt.Errorf("--results-dir must point to a directory")
 			}
 
-			// Verifica se o diretório fornecido é um diretório de tarefa (contém 'recon')
-			// ou se é o próprio diretório 'recon'.
 			reconPath := filepath.Join(scanResultsDir, "recon")
 			if _, err := os.Stat(reconPath); err != nil && filepath.Base(scanResultsDir) == "recon" {
-				reconPath = scanResultsDir // O usuário apontou diretamente para a pasta recon.
+				reconPath = scanResultsDir
 			}
 			if _, err := os.Stat(reconPath); err == nil {
-				// É um diretório de tarefa único.
 				taskName := filepath.Base(scanResultsDir)
 				taskIdentifiers[taskName] = struct{}{}
 			} else { // Se não for um diretório de tarefa, assume que é um diretório pai.
-				// É um diretório pai (como 'results/'). Procura por subdiretórios de tarefas.
 				entries, err := os.ReadDir(scanResultsDir)
 				if err != nil {
 					return fmt.Errorf("could not read parent results directory %s: %w", scanResultsDir, err)
@@ -94,21 +73,18 @@ Usage Examples:
 			}
 
 		} else {
-			// Modo legado: O usuário passa um ou mais nomes de tarefas como argumentos.
 			if len(args) > 0 {
 				scanTarget = args[0]
 			}
 			if scanTarget == "" {
 				return fmt.Errorf("a task name or --results-dir must be specified for the scan command")
 			}
-			// Assume que o argumento é o nome da tarefa.
 			taskIdentifiers[scanTarget] = struct{}{}
 		}
 
 		for taskID := range taskIdentifiers {
 			slog.Info("===== STARTING SCAN =====", "task_identifier", taskID)
-			// A chamada para StartScan agora é mais simples e lógica.
-			summary, _, err := scan.StartScan(taskID, "", scanSkipSteps, scanOnlySteps, scanAggressive, true, logger) // true para interativo
+			summary, _, err := scan.StartScan(cmd.Context(), taskID, "", scanSkipSteps, scanOnlySteps, scanAggressive, true, logger)
 			if err != nil {
 				slog.Error("Vulnerability scan failed for task", "task_identifier", taskID, "error", err)
 				continue
