@@ -13,6 +13,8 @@ import (
 
 	"redrecon/internal/config"
 	"redrecon/pkg/recon"
+	"redrecon/pkg/utils"
+	"redrecon/pkg/types"
 	"redrecon/pkg/target"
 
 	"github.com/gocolly/colly/v2"
@@ -32,7 +34,7 @@ type webState struct {
 func StartWeb(taskIdentifier, targetURL string, depth int, logger *slog.Logger) (string, []string, error) {
 	logger.Info("Starting web crawl and analysis process", "target", targetURL, "depth", depth)
 
-	sanitizedTaskIdentifier := recon.SanitizeTargetForPath(taskIdentifier)
+	sanitizedTaskIdentifier := utils.SanitizeTargetForPath(taskIdentifier)
 	resultsPath := filepath.Join("results", sanitizedTaskIdentifier, "web")
 	if err := os.MkdirAll(resultsPath, 0755); err != nil {
 		return "", nil, fmt.Errorf("could not create web results directory: %w", err)
@@ -69,7 +71,7 @@ func StartWeb(taskIdentifier, targetURL string, depth int, logger *slog.Logger) 
 	// Manipulador para baixar os ativos
 	c.OnResponse(func(r *colly.Response) {
 		// Sanitiza a URL para criar um nome de arquivo seguro
-		sanitizedFilename := recon.SanitizeTargetForPath(r.Request.URL.String())
+		sanitizedFilename := utils.SanitizeTargetForPath(r.Request.URL.String())
 		// Adiciona uma extensão se não houver
 		if filepath.Ext(sanitizedFilename) == "" {
 			contentType := r.Headers.Get("Content-Type")
@@ -130,19 +132,19 @@ func StartWeb(taskIdentifier, targetURL string, depth int, logger *slog.Logger) 
 				if strings.HasSuffix(filePath, ".js") || strings.HasSuffix(filePath, ".html") {
 					secrets, endpoints := recon.AnalyzeContentForPatterns(string(content))
 					if len(secrets) > 0 || len(endpoints) > 0 {
-						findings := recon.URLFindings{
+						findings := types.URLFindings{
 							URL:       strings.TrimPrefix(filePath, assetsPath), // Usa o caminho relativo como identificador
 							Secrets:   secrets,
 							Endpoints: endpoints,
 						}
-						recon.WriteFindings(writer, &mu, "ASSET", findings)
+						recon.WriteFindings(writer, &mu, "ASSET", findings, logger)
 					}
 				}
 
 				// Analisa metadados de imagens e PDFs
 				if recon.IsMetadataTarget(filePath) {
 					// A função analyzeFileMetadata espera uma URL, então passamos o caminho do arquivo como um pseudo-URL
-					recon.AnalyzeFileMetadata(&wg, "file://"+filePath, writer, &mu, logger)
+					recon.AnalyzeFileMetadata(state.ctx, &wg, "file://"+filePath, writer, &mu, logger)
 				}
 			}(path)
 		}
@@ -157,7 +159,7 @@ func StartWeb(taskIdentifier, targetURL string, depth int, logger *slog.Logger) 
 	// --- Etapa 3: Gerar sumário ---
 	summary := fmt.Sprintf("✅ **Web Crawl & Analysis Summary for: %s**\n\n", targetURL)
 	summary += fmt.Sprintf("• **Crawl Depth:** %d\n", depth)
-	findingsCount := recon.CountLines(state.findingsFile)
+	findingsCount := utils.CountLines(state.findingsFile)
 	summary += fmt.Sprintf("• **Findings (Secrets/Endpoints/Metadata):** %d\n", findingsCount)
 	summary += fmt.Sprintf("\n*Full results and downloaded assets are in:* `%s`", resultsPath)
 

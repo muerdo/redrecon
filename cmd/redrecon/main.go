@@ -33,19 +33,11 @@ var rootCmd = &cobra.Command{
 }
 
 func isSupportedDistro(content []byte) error {
-	var isSupported bool
 	lowerContent := strings.ToLower(string(content))
 
-	// Check for ID=kali or ID=parrot, allowing for spaces and quotes.
-	// Also check ID_LIKE for Debian-based systems that might be Parrot.
-	for _, line := range strings.Split(lowerContent, "\n") {
-		trimmedLine := strings.TrimSpace(line)
-		if strings.Contains(trimmedLine, "id=kali") || strings.Contains(trimmedLine, "id=parrot") {
-			isSupported = true
-			break
-		}
-	}
-	if !isSupported {
+	// Verifica se o conteúdo contém os identificadores das distribuições suportadas.
+	// Isso é mais simples do que iterar por cada linha.
+	if !strings.Contains(lowerContent, "id=kali") && !strings.Contains(lowerContent, "id=parrot") {
 		msg := "unsupported Linux distribution. Please run on Parrot or Kali Linux"
 		slog.Error(msg)
 		return fmt.Errorf(msg)
@@ -70,25 +62,20 @@ func checkHostOS() error {
 }
 
 func init() {
+	// A inicialização da configuração agora é tratada pelo Cobra.
 	cobra.OnInitialize(initConfig)
-	cmd.AddCommands(rootCmd)
 }
 
 func initConfig() {
 	if err := config.LoadConfig(); err != nil {
-		slog.Error("failed to load configuration", "error", err)
+		// Usamos fmt.Println aqui porque o logger pode não estar totalmente configurado ainda.
+		fmt.Fprintf(os.Stderr, "Erro fatal: falha ao carregar a configuração: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func main() {
-	// This needs to be called before Execute because initConfig is called by cobra.OnInitialize
-	initConfig()
-	
-	// Execute the root command. Cobra will parse the command-line arguments
-	// and run the appropriate command's 'Run' function.
-	if err := rootCmd.Execute(); err != nil {
-		slog.Error("Whoops. There was an error while executing your CLI", "error", err)
-		os.Exit(1)
-	}
+	// A função Execute do pacote cmd agora é o ponto de entrada principal.
+	// Ela lida com a inicialização e execução de todos os comandos.
+	cmd.Execute()
 }

@@ -32,6 +32,10 @@ go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/projectdiscovery/dnsvalidator/cmd/dnsvalidator@latest
 go install -v github.com/projectdiscovery/katana/cmd/katana@latest
 go install -v github.com/tomnomnom/waybackurls@latest
+go install -v github.com/tomnomnom/assetfinder@latest
+
+# Install Feroxbuster (Recommended)
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/epi052/feroxbuster/main/install-nix.sh)"
 ```
 
 ### 3. Build redrecon-Go
@@ -61,14 +65,17 @@ RedRecon is organized into several commands.
 
 ### Reconnaissance (`recon`)
 
-Run a full reconnaissance workflow against a target domain. The results are saved in `results/<target>/recon/`.
+Run a full reconnaissance workflow against a target. This command discovers subdomains, validates live hosts, and gathers URLs. The results are saved in `results/<target>/recon/`.
 
 ```bash
-# Run a full scan
+# Run a full reconnaissance scan
 ./redrecon recon example.com
 
 # Use a custom task name to group results differently
 ./redrecon recon -n my-project-task example.com
+
+# Skip specific steps like fuzzing (ffuf)
+./redrecon recon example.com --skip ffuf
 ```
 
 ### Web Scan (`web`)

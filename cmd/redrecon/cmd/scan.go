@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"redrecon/pkg/scan"
-	"redrecon/pkg/target"
 
 	"github.com/spf13/cobra"
 )
@@ -16,7 +15,7 @@ var (
 	scanTarget  string
 	scanSkipSteps []string
 	scanOnlySteps []string
-	scanTaskName   string
+	scanAggressive bool
 	scanResultsDir string
 )
 
@@ -43,17 +42,15 @@ Usage Examples:
   redrecon scan example.com --only nuclei,cvesearch
 
   # Run the scan, but skip the 'bbot' step
-  redrecon scan example.com --skip bbot`,
+  redrecon scan example.com --skip bbot
+
+  # Run an aggressive scan using bbot's 'kitchen-sink' profile
+  redrecon scan example.com --aggressive`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-		taskIdentifiers := make(map[string]string) // Mapeia taskIdentifier para o rootDomain original
+		taskIdentifiers := make(map[string]struct{}) // Agora um set, pois o taskID é a única fonte da verdade.
 
-		if scanTaskName != "" {
-			// Modo 1: --task-name tem alta prioridade.
-			slog.Info("Scanning based on provided task name", "task", scanTaskName)
-			// O nome da tarefa é o identificador e o domínio raiz para fins de caminho.
-			taskIdentifiers[scanTaskName] = scanTaskName
-		} else if scanResultsDir != "" {
+		if scanResultsDir != "" {
 			// Modo 2: O usuário especificou um diretório de resultados. Esta é a forma mais explícita.
 			slog.Info("Scanning based on provided results directory", "dir", scanResultsDir)
 			info, err := os.Stat(scanResultsDir)
@@ -65,11 +62,16 @@ Usage Examples:
 				return fmt.Errorf("--results-dir must point to a directory")
 			}
 
-			// Verifica se o diretório fornecido é um diretório de tarefa (contém 'recon').
-			if _, err := os.Stat(filepath.Join(scanResultsDir, "recon")); err == nil {
+			// Verifica se o diretório fornecido é um diretório de tarefa (contém 'recon')
+			// ou se é o próprio diretório 'recon'.
+			reconPath := filepath.Join(scanResultsDir, "recon")
+			if _, err := os.Stat(reconPath); err != nil && filepath.Base(scanResultsDir) == "recon" {
+				reconPath = scanResultsDir // O usuário apontou diretamente para a pasta recon.
+			}
+			if _, err := os.Stat(reconPath); err == nil {
 				// É um diretório de tarefa único.
 				taskName := filepath.Base(scanResultsDir)
-				taskIdentifiers[taskName] = taskName
+				taskIdentifiers[taskName] = struct{}{}
 			} else { // Se não for um diretório de tarefa, assume que é um diretório pai.
 				// É um diretório pai (como 'results/'). Procura por subdiretórios de tarefas.
 				entries, err := os.ReadDir(scanResultsDir)
@@ -80,7 +82,7 @@ Usage Examples:
 					if entry.IsDir() {
 						taskPath := filepath.Join(scanResultsDir, entry.Name())
 						if _, err := os.Stat(filepath.Join(taskPath, "recon")); err == nil {
-							taskIdentifiers[entry.Name()] = entry.Name()
+							taskIdentifiers[entry.Name()] = struct{}{}
 						}
 					}
 				}
@@ -92,33 +94,21 @@ Usage Examples:
 			}
 
 		} else {
-			// Modo 3: Comportamento legado, baseado em alvos passados como argumento.
+			// Modo legado: O usuário passa um ou mais nomes de tarefas como argumentos.
 			if len(args) > 0 {
 				scanTarget = args[0]
-			} // A flag -t também pode definir scanTarget
-			if scanTarget == "" && scanTaskName == "" && scanResultsDir == "" {
-				return fmt.Errorf("a target or --results-dir must be specified for the scan command")
 			}
-
-			var targetsToScan []string
-			if target.IsTargetFile(scanTarget) {
-				parsedTargets, err := target.ParseTargetFile(scanTarget)
-				if err != nil {
-					return fmt.Errorf("failed to parse target file: %w", err)
-				}
-				targetsToScan = parsedTargets
-			} else {
-				targetsToScan = []string{scanTarget}
+			if scanTarget == "" {
+				return fmt.Errorf("a task name or --results-dir must be specified for the scan command")
 			}
-
-			for _, t := range targetsToScan {
-				taskIdentifiers[t] = t
-			}
+			// Assume que o argumento é o nome da tarefa.
+			taskIdentifiers[scanTarget] = struct{}{}
 		}
 
-		for taskID, rootDomain := range taskIdentifiers {
+		for taskID := range taskIdentifiers {
 			slog.Info("===== STARTING SCAN =====", "task_identifier", taskID)
-			summary, _, err := scan.StartScan(taskID, rootDomain, scanSkipSteps, scanOnlySteps, logger)
+			// A chamada para StartScan agora é mais simples e lógica.
+			summary, _, err := scan.StartScan(taskID, "", scanSkipSteps, scanOnlySteps, scanAggressive, true, logger) // true para interativo
 			if err != nil {
 				slog.Error("Vulnerability scan failed for task", "task_identifier", taskID, "error", err)
 				continue
@@ -132,8 +122,8 @@ Usage Examples:
 
 func init() {
 	ScanCmd.Flags().StringVarP(&scanTarget, "target", "t", "", "Target for scanning (domain, file, or directory). Must have been processed by 'recon' first.")
-	ScanCmd.Flags().StringVarP(&scanTaskName, "task-name", "n", "", "Name of the task to scan, corresponding to a results directory.")
 	ScanCmd.Flags().StringVar(&scanResultsDir, "results-dir", "", "Path to an existing results directory to run the scan on. Can be a parent directory (e.g., 'results/').")
+	ScanCmd.Flags().BoolVar(&scanAggressive, "aggressive", false, "Run bbot in aggressive mode ('kitchen-sink' preset).")
 	ScanCmd.Flags().StringSliceVarP(&scanSkipSteps, "skip", "s", []string{}, "Comma-separated list of scan steps to skip (e.g., 'bbot,nikto').")
 	ScanCmd.Flags().StringSliceVar(&scanOnlySteps, "only", []string{}, "Run ONLY the specified scan steps (e.g., 'nuclei,cvesearch').")
 }

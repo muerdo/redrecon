@@ -15,8 +15,9 @@ var (
 	reconTarget       string
 	reconSkipSteps    []string
 	reconNoRedirects  bool
-	reconTaskName     string
 	reconFollowRedirects bool
+	reconSkipAnalysis bool // Nova flag para pular a Fase 5
+	reconForceScan    bool // Renomeado para evitar conflito com run.go
 )
 
 // ReconCmd represents the recon command
@@ -78,31 +79,20 @@ Usage Examples:
 			followRedirects = true
 		}
 
-		// Se um nome de tarefa for fornecido, ele tem prioridade e agrupa todos os alvos.
-		if reconTaskName != "" {
-			slog.Info("Processing all targets under a single task name", "task_name", reconTaskName, "target_count", len(targetsToScan))
-			// O "rootTarget" para fins de sumarização e lógica interna será o próprio nome da tarefa.
-			summary, _, err := recon.StartRecon(reconTaskName, reconTaskName, targetsToScan, reconSkipSteps, followRedirects, true, logger) // true para interativo
+		// Comportamento unificado: processa cada alvo ou grupo de domínio raiz separadamente.
+		rootTargets := make(map[string][]string)
+		for _, t := range targetsToScan {
+			rootDomain := target.GetRootDomain(t)
+			rootTargets[rootDomain] = append(rootTargets[rootDomain], t)
+		}
+
+		for root, subs := range rootTargets {
+			summary, _, _, err := recon.StartRecon(root, root, subs, reconSkipSteps, reconSkipAnalysis, followRedirects, true, reconForceScan, logger) // true para interativo
 			if err != nil {
-				slog.Error("Reconnaissance failed for task", "task_name", reconTaskName, "error", err)
+				slog.Error("Reconnaissance failed for root target", "target", root, "error", err)
+				continue
 			}
 			fmt.Println(summary)
-		} else {
-			// Comportamento sem --task-name: processa cada alvo ou grupo de domínio raiz separadamente.
-			rootTargets := make(map[string][]string)
-			for _, t := range targetsToScan {
-				rootDomain := target.GetRootDomain(t)
-				rootTargets[rootDomain] = append(rootTargets[rootDomain], t)
-			}
-
-			for root, subs := range rootTargets {
-				summary, _, err := recon.StartRecon(root, root, subs, reconSkipSteps, followRedirects, true, logger) // true para interativo
-				if err != nil {
-					slog.Error("Reconnaissance failed for root target", "target", root, "error", err)
-					continue
-				}
-				fmt.Println(summary)
-			}
 		}
 
 		return nil
@@ -111,8 +101,9 @@ Usage Examples:
 
 func init() {
 	ReconCmd.Flags().StringVarP(&reconTarget, "target", "t", "", "Target for reconnaissance (domain, file, or directory).")
-	ReconCmd.Flags().StringVarP(&reconTaskName, "task-name", "n", "", "Optional name for the task, to group all results under a single directory (e.g., 'QuintoAndar').")
 	ReconCmd.Flags().StringSliceVarP(&reconSkipSteps, "skip", "s", []string{}, "Comma-separated list of recon steps to skip (e.g., 'ffuf,wayback').")
 	ReconCmd.Flags().BoolVar(&reconNoRedirects, "no-redirects", false, "Disable following HTTP redirects (deprecated, use --follow-redirects=false).")
-	ReconCmd.Flags().BoolVar(&reconFollowRedirects, "follow-redirects", true, "Enable or disable following HTTP redirects during live host validation.")
+	ReconCmd.Flags().BoolVar(&reconSkipAnalysis, "skip-analysis", false, "Skip the entire analysis, enrichment, and detection phase (Phase 5).")
+	ReconCmd.Flags().BoolVar(&reconFollowRedirects, "follow-redirects", true, "Enable or disable following HTTP redirects during live host validation.") // Corrected comment
+	ReconCmd.Flags().BoolVar(&reconForceScan, "force-scan", false, "Force scanning even if no live hosts are found, using resolved subdomains.") // Renamed
 }

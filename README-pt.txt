@@ -3,8 +3,7 @@ RedRecon
 RedRecon é uma ferramenta de orquestração de segurança rápida e flexível construída em Go. Ele automatiza fluxos de trabalho de reconhecimento e varredura de segurança, orquestrando uma sequência de ferramentas populares de código aberto para descobrir e analisar ativos digitais.
 
 Funcionalidades
-
-- Fluxos de Trabalho Modulares: Comandos separados para diferentes estágios de avaliação (`recon`, `infra`, `web`, `scan`).
+- Fluxo de Trabalho Unificado: Um único comando `run` para executar um fluxo completo de reconhecimento e varredura.
 - Reconhecimento Abrangente: Descobre subdomínios, valida hosts ativos, coleta URLs e analisa arquivos JavaScript.
 - Rastreamento de Aplicações Web: Baixa o conteúdo de sites (JS, CSS, Source Maps) para análise offline com controle de profundidade.
 - Descoberta de Endpoints e Segredos: Extrai automaticamente potenciais endpoints de API de arquivos JavaScript.
@@ -24,7 +23,7 @@ O RedRecon orquestra várias ferramentas externas. Você deve instalá-las e gar
 
 
 # Instale ferramentas do gerenciador de pacotes
-sudo apt update && sudo apt install -y subfinder dnsutils nmap nuclei nikto whatweb
+sudo apt update && sudo apt install -y subfinder dnsutils nmap nuclei nikto whatweb gobuster
 
 # Instale ferramentas baseadas em Go
 go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
@@ -32,6 +31,10 @@ go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/projectdiscovery/dnsvalidator/cmd/dnsvalidator@latest
 go install -v github.com/projectdiscovery/katana/cmd/katana@latest
 go install -v github.com/tomnomnom/waybackurls@latest
+go install -v github.com/tomnomnom/assetfinder@latest
+
+# Instale o Feroxbuster (Recomendado)
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/epi052/feroxbuster/main/install-nix.sh)"
 
 
 3. Compile o RedRecon
@@ -54,55 +57,33 @@ Configuração
 
 Uso
 
-O RedRecon é organizado em vários comandos.
+O RedRecon agora se concentra em um comando principal unificado: `run`.
 
-Reconhecimento (`recon`)
+Fluxo de Trabalho Completo (`run`)
 
-Execute um fluxo de trabalho completo de reconhecimento em um ou mais alvos.
+Executa um fluxo de trabalho completo, começando com o reconhecimento para mapear os ativos e, em seguida, realizando uma varredura de vulnerabilidades nos ativos encontrados. Os resultados são salvos em `results/<alvo>/recon/` e `results/<alvo>/scan/`.
 
-# Execute uma varredura completa em um único domínio
-./redrecon recon example.com
+# Execute uma avaliação completa em um alvo
+./redrecon run example.com
 
-# Execute uma varredura em múltiplos alvos a partir de um arquivo de texto
-# O arquivo pode conter domínios, subdomínios, wildcards ou URLs.
-# A ferramenta irá normalizá-los para o domínio raiz.
-./redrecon recon targets.txt
+# Execute a avaliação, pulando a etapa de fuzzing no reconhecimento e a etapa do nikto na varredura
+./redrecon run example.com --recon-skip fuzz --scan-skip nikto
 
-# Pule etapas específicas
-./redrecon recon -s nikto -s bbot example.com
-
-Varredura Web (`web`)
-
-Rastreie um site para baixar seus ativos para análise.
-
-# Rastreie um site com profundidade padrão (2)
-./redrecon web https://example.com
-
-# Rastreie com uma profundidade específica
-./redrecon web -d 5 https://example.com
+# Execute a avaliação, mas na fase de varredura, rode apenas o nuclei e a busca por CVEs
+./redrecon run example.com --scan-only nuclei,cvesearch
 
 Busca (`search`)
 
 Procure por termos em todos os arquivos de resultados gerados.
 
 # Encontre todas as ocorrências de "password"
-./redrecon search "password"
+./redrecon search "senha"
 
 # Encontre potenciais chaves de API usando regex, apenas nos resultados de example.com
 ./redrecon search -t example.com -r "[a-fA-F0-9]{32}"
 
 # Liste apenas os arquivos que contêm o termo "admin"
 ./redrecon search -l "admin"
-
-Varredura (`scan`)
-
-Execute uma varredura focada do Nuclei em um alvo.
-
-# Procure por CVEs
-./redrecon scan -t example.com -T cve
-
-# Faça uma varredura usando um template personalizado
-./redrecon scan -t example.com -T /caminho/para/meu/template.yaml
 
 Licença
 

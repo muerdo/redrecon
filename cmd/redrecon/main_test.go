@@ -38,20 +38,20 @@ ID_LIKE=debian`,
 ID=ubuntu
 VERSION_ID="22.04"`,
 			expectError: true,
-			errorMsg:    "distribuição Linux não suportada. Execute em Parrot ou Kali Linux",
+			errorMsg:    "unsupported Linux distribution. Please run on Parrot or Kali Linux",
 		},
 		{
 			name:        "Conteúdo vazio",
 			osRelease:   ``,
 			expectError: true,
-			errorMsg:    "distribuição Linux não suportada. Execute em Parrot ou Kali Linux",
+			errorMsg:    "unsupported Linux distribution. Please run on Parrot or Kali Linux",
 		},
 		{
 			name: "Sem linha de ID",
 			osRelease: `PRETTY_NAME="Some Linux"
 VERSION="1.0"`,
 			expectError: true,
-			errorMsg:    "distribuição Linux não suportada. Execute em Parrot ou Kali Linux",
+			errorMsg:    "unsupported Linux distribution. Please run on Parrot or Kali Linux",
 		},
 	}
 

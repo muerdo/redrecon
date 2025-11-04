@@ -1,8 +1,8 @@
 package scan
 
 import (
-	"encoding/json"
 	"bufio"
+	"encoding/json"
 	"context"
 	"fmt"
 	"regexp"
@@ -14,15 +14,19 @@ import (
 	"strings"
 	"sync"
 
+	"redrecon/pkg/analysis"
 	"redrecon/internal/config"
-	"redrecon/pkg/recon" // Usado para SanitizeTargetForPath e fileExistsAndIsNotEmpty
+	"redrecon/pkg/utils"
+	"redrecon/pkg/types"
+	"redrecon/pkg/tools"
+	"redrecon/pkg/recon"
 )
 
 // executeCommand é uma função auxiliar para executar comandos externos.
 // Ela delega a chamada para a função centralizada no pacote recon.
 func executeCommand(ctx context.Context, logger *slog.Logger, toolName string, args ...string) (string, error) {
-	// Reutiliza a função robusta do pacote recon para consistência.
-	return recon.ExecuteCommand(ctx, logger, toolName, args...)
+	// Reutiliza a função robusta do pacote utils para consistência.
+	return utils.ExecuteCommand(ctx, logger, toolName, args...)
 }
 
 // scanState armazena o estado e os caminhos para uma operação de varredura.
@@ -38,9 +42,20 @@ type scanState struct {
 	nucleiScanFile     string
 	cveScanFile        string
 	niktoScanFile      string
+	dalfoxScanFile     string // Para resultados do Dalfox (XSS)
+	paramSpiderFile    string // Para resultados do ParamSpider (IDOR/BAC)
 	owaspScanFile      string
 	bbotScanFile       string
 	apiFuzzFile        string
+
+	// Campos para armazenar resultados de análise pós-scan
+	parsedNucleiFindings []types.NucleiFinding
+	parsedHttpxVulnFindings []analysis.HttpxVulnerabilityFinding
+	parsedNiktoFindings []analysis.NiktoFinding
+	parsedFfufFindings []analysis.FfufFinding
+	parsedDirsearchFindings []analysis.DirsearchFinding
+	parsedCVEFindings []types.CVEResult
+
 	tempDir            string // Diretório temporário para esta execução de scan
 	logger             *slog.Logger
 	wafMap             map[string]string // Mapeia host -> nome do WAF
@@ -49,27 +64,34 @@ type scanState struct {
 type scanStep func(state *scanState) error
 
 // StartScan inicia o fluxo de trabalho de varredura de vulnerabilidades para um alvo.
-func StartScan(taskIdentifier string, target string, skipSteps, onlySteps []string, logger *slog.Logger) (string, []string, error) {
-	logger.Info("Starting vulnerability scan process", "target", target)
+func StartScan(ctx context.Context, taskIdentifier string, inputFile string, skipSteps, onlySteps []string, isAggressive, isInteractive bool, logger *slog.Logger) (string, []string, error) {
+	logger.Info("Starting vulnerability scan process", "task", taskIdentifier)
 
-	sanitizedTaskIdentifier := recon.SanitizeTargetForPath(taskIdentifier)
+	sanitizedTaskIdentifier := utils.SanitizeTargetForPath(taskIdentifier) // O taskIdentifier é a única fonte da verdade.
 	// O scan lê de 'recon' e escreve em 'scan' para manter a separação.
 	reconResultsPath := filepath.Join("results", sanitizedTaskIdentifier, "recon")
 	scanResultsPath := filepath.Join("results", sanitizedTaskIdentifier, "scan")
-	
-	// Verifica se o diretório de resultados do 'recon' existe e tem conteúdo útil.
-	// O scan depende dos artefatos gerados pelo recon.
-	liveSubdomainsFile := filepath.Join(reconResultsPath, "live_subdomains.txt")
-	urlsFile := filepath.Join(reconResultsPath, "urls.txt")
-	if !recon.FileExistsAndIsNotEmpty(liveSubdomainsFile) && !recon.FileExistsAndIsNotEmpty(urlsFile) {
-		errMsg := fmt.Sprintf("recon results not found or are empty for target '%s'. Please run 'recon' command first.", target)
-		logger.Error(errMsg, "checked_path", reconResultsPath)
-		return "", nil, fmt.Errorf(errMsg)
-	}
 
-	if err := os.MkdirAll(scanResultsPath, 0755); err != nil {
-		logger.Error("Failed to create scan directory", "path", scanResultsPath, "error", err)
-		return "", nil, fmt.Errorf("could not create directory %s: %w", scanResultsPath, err)
+	var initialTargetsFile string
+
+	if inputFile != "" {
+		// Se um arquivo de entrada for fornecido, use-o diretamente.
+		if !utils.FileExistsAndIsNotEmpty(inputFile) {
+			return "", nil, fmt.Errorf("input file provided but not found or is empty: %s", inputFile)
+		}
+		logger.Info("Using provided input file for scan targets", "file", inputFile)
+		initialTargetsFile = inputFile
+	} else {
+		// Comportamento padrão: verifica os resultados do 'recon'.
+		liveSubdomainsFile := filepath.Join(reconResultsPath, "live_subdomains.txt")
+		urlsFile := filepath.Join(reconResultsPath, "urls.txt")
+		if !utils.FileExistsAndIsNotEmpty(liveSubdomainsFile) && !utils.FileExistsAndIsNotEmpty(urlsFile) {
+			detailedMsg := fmt.Sprintf("scan aborted for task '%s': Neither 'live_subdomains.txt' nor 'urls.txt' were found or are empty in the recon results directory. Please run the 'recon' command for this target first.", taskIdentifier)
+			logger.Error(detailedMsg, "missing_files", []string{liveSubdomainsFile, urlsFile})
+			return "", nil, fmt.Errorf(detailedMsg)
+		}
+		// Define o arquivo a ser usado para a unificação.
+		initialTargetsFile = liveSubdomainsFile // A unificação cuidará de adicionar os outros.
 	}
 
 	// Cria um diretório temporário dentro da pasta de resultados do alvo para esta execução específica do scan.
@@ -78,19 +100,52 @@ func StartScan(taskIdentifier string, target string, skipSteps, onlySteps []stri
 		return "", nil, fmt.Errorf("failed to create temporary directory for scan: %w", err)
 	}
 
+	// Unifica as entradas (live subdomains e URLs) em um único arquivo de alvos para o scan.
+	portscanFile := filepath.Join(reconResultsPath, "portscan_results.txt")
+	scanTargetsFile := filepath.Join(tempDir, "scan_targets.txt")
+	
+	// Lista de arquivos a serem combinados. Se inputFile for usado, os outros podem não existir.
+	filesToCombine := []string{initialTargetsFile, filepath.Join(reconResultsPath, "urls.txt"), portscanFile}
+	if inputFile != "" {
+		filesToCombine = []string{initialTargetsFile} // Se um arquivo de entrada for fornecido, apenas ele é usado.
+	}
+	if err := utils.CombineAndDeduplicateFiles(scanTargetsFile, filesToCombine...); err != nil {
+		return "", nil, fmt.Errorf("failed to create unified target list for scan: %w", err)
+	}
+
+	logger.Info("Unified scan target list created", "path", scanTargetsFile, "total_targets", utils.CountLines(scanTargetsFile))
+
+	// Filtra a lista de alvos para remover URLs de arquivos estáticos (imagens, css, etc.)
+	filteredScanTargetsFile := filepath.Join(tempDir, "filtered_scan_targets.txt")
+	if err := utils.FilterScanTargets(scanTargetsFile, filteredScanTargetsFile, logger); err != nil {
+		return "", nil, fmt.Errorf("failed to filter scan targets: %w", err)
+	}
+
+	initialCount := utils.CountLines(scanTargetsFile)
+	finalCount := utils.CountLines(filteredScanTargetsFile)
+	logger.Info("Scan target list filtered", "initial_count", initialCount, "final_count", finalCount, "removed", initialCount-finalCount)
+
+	if err := os.MkdirAll(scanResultsPath, 0755); err != nil {
+		logger.Error("Failed to create scan directory", "path", scanResultsPath, "error", err)
+		return "", nil, fmt.Errorf("could not create directory %s: %w", scanResultsPath, err)
+	}
+
+	// Cria um diretório temporário dentro da pasta de resultados do alvo para esta execução específica do scan.
 	state := &scanState{
-		ctx:                context.Background(),
-		target:             target,
+		ctx:                ctx, // Usa o contexto recebido
+		target:             taskIdentifier, // O alvo principal para ferramentas como bbot é o próprio identificador da tarefa.
 		resultsPath:        scanResultsPath,
 		logger:             logger,
-		wafResultsFile:     filepath.Join(reconResultsPath, "waf_results.json"),
-		liveSubdomainsFile: liveSubdomainsFile,
-		urlsFile:           urlsFile,
+		wafResultsFile:     filepath.Join(reconResultsPath, "waf_results.json"), 
+		liveSubdomainsFile: filteredScanTargetsFile, // Usa o arquivo filtrado como entrada para as etapas de scan
+		urlsFile:           filteredScanTargetsFile, // Usa o arquivo filtrado como entrada para as etapas
 		techFile:           filepath.Join(reconResultsPath, "httpx_tech.json"),
 		vulnerabilityFile:  filepath.Join(scanResultsPath, "vulnerability_findings.txt"),
 		nucleiScanFile:     filepath.Join(scanResultsPath, "nuclei_scan.txt"),
 		cveScanFile:        filepath.Join(scanResultsPath, "cve_results.json"),
 		niktoScanFile:      filepath.Join(scanResultsPath, "nikto_scan.txt"),
+		dalfoxScanFile:     filepath.Join(scanResultsPath, "dalfox_xss.txt"),
+		paramSpiderFile:    filepath.Join(scanResultsPath, "paramspider_urls.txt"),
 		owaspScanFile:      filepath.Join(scanResultsPath, "owasp_scan.txt"),
 		bbotScanFile:       filepath.Join(scanResultsPath, "bbot_scan.json"),
 		apiFuzzFile:        filepath.Join(scanResultsPath, "apifuzz_results.json"),
@@ -110,13 +165,16 @@ func StartScan(taskIdentifier string, target string, skipSteps, onlySteps []stri
 	}
 
 	workflow := map[string]scanStep{
-		"vulntests": stepRunVulnerabilityTests,
-		"nuclei":    stepRunNucleiScan,
-		"cvesearch": stepRunCVESearch,
-		"owasp":     stepRunOWASPTests,
-		"nikto":     stepRunNikto,
-		"bbot":      stepRunBBot,
+		"paramspider": stepRunParamSpider, // Descoberta de parâmetros para IDOR/BAC
+		"vulntests":   stepRunVulnerabilityTests,
+		"dalfox":      stepRunDalfox, // Varredura de XSS
+		"nuclei":      stepRunNucleiScan,
+		"cvesearch":   stepRunCVESearch,
+		"owasp":       stepRunOWASPTests,
+		"nikto":       stepRunNikto,
+		"bbot":      func(s *scanState) error { return stepRunBBot(s, isAggressive) },
 		"apifuzz":   stepRunAPIFuzzing,
+		"postscananalysis": stepRunPostScanAnalysis, // Nova etapa de análise
 	}
 
 	var executionOrder []string
@@ -131,44 +189,94 @@ func StartScan(taskIdentifier string, target string, skipSteps, onlySteps []stri
 		executionOrder = onlySteps
 		skipSet = make(map[string]struct{}) // Ignora qualquer flag --skip se --only for usada
 	} else {
-		// Ordem de execução padrão se --only não for usada.
-		executionOrder = []string{"vulntests", "nuclei", "cvesearch", "owasp", "nikto", "bbot", "apifuzz"}
+		// Ordem de execução padrão se --only não for usada. Adiciona a etapa de análise ao final.
+		executionOrder = []string{"paramspider", "vulntests", "dalfox", "nuclei", "cvesearch", "owasp", "nikto", "bbot", "apifuzz"}
 	}
-
+	executionOrder = append(executionOrder, "postscananalysis") // Garante que a análise sempre rode no final
 	logger.Info("Starting vulnerability scan tasks.")
 
-	var wg sync.WaitGroup
-	// Limita o número de ferramentas pesadas rodando ao mesmo tempo.
-	// O valor pode ser ajustado na configuração se necessário.
-	concurrencyLimit := make(chan struct{}, config.Cfg.Engine.MaxParallelTasks)
-	errChan := make(chan error, len(executionOrder))
-
-	for _, stepName := range executionOrder {
-		if _, shouldSkip := skipSet[stepName]; shouldSkip {
-			state.logger.Warn("Skipping step as requested", "step", stepName)
-			continue
-		}
-
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
-			logger.Info(fmt.Sprintf("Starting scan step: %s", name))
-			concurrencyLimit <- struct{}{} // Adquire um slot de concorrência
-			defer func() { <-concurrencyLimit }() // Libera o slot
-
-			stepFunc := workflow[name]
-			if err := stepFunc(state); err != nil {
-				logger.Error("A scan step failed", "step", name, "error", err)
-				errChan <- fmt.Errorf("step %s failed: %w", name, err)
+	if isInteractive {
+		// Lógica interativa para pular etapas
+		skipInputChan := make(chan string)
+		go func() {
+			scanner := bufio.NewScanner(os.Stdin)
+			for scanner.Scan() {
+				skipInputChan <- strings.TrimSpace(scanner.Text())
 			}
-		}(stepName)
+		}()
+
+		totalSteps := len(executionOrder)
+		for i, stepName := range executionOrder {
+			if _, shouldSkip := skipSet[stepName]; shouldSkip {
+				state.logger.Warn("Skipping step as requested by flags", "step", stepName)
+				continue
+			}
+
+			stepFunc, ok := workflow[stepName]
+			if !ok {
+				continue
+			}
+
+			stepCtx, cancelStep := context.WithCancel(state.ctx)
+			errChan := make(chan error, 1)
+
+			fmt.Printf("\n-> Press 's' and Enter to skip the current step: [%s]\n", stepName)
+			state.logger.Info(fmt.Sprintf("[Step %d/%d] Starting: %s", i+1, totalSteps, stepName))
+
+			go func() {
+				stepState := *state
+				stepState.ctx = stepCtx
+				errChan <- stepFunc(&stepState)
+			}()
+
+			select {
+			case err := <-errChan:
+				if err != nil {
+					state.logger.Error("A scan step failed", "step", stepName, "error", err)
+					// No modo interativo, podemos optar por continuar para a próxima etapa
+				}
+			case input := <-skipInputChan:
+				if strings.ToLower(input) == "s" {
+					state.logger.Warn("User requested to skip step. Cancelling...", "step", stepName)
+					cancelStep()
+					<-errChan // Aguarda a goroutine terminar após o cancelamento
+				}
+			case <-state.ctx.Done():
+				slog.Info("Scan process cancelled.", "error", state.ctx.Err())
+				cancelStep() // Cancela a etapa em andamento
+				return "", nil, state.ctx.Err()
+			}
+			cancelStep() // Garante que o contexto da etapa seja cancelado ao final
+		}
+	} else {
+		// Lógica não interativa (para 'chain' e bot do Discord)
+		var wg sync.WaitGroup
+		concurrencyLimit := make(chan struct{}, config.Cfg.Engine.MaxParallelTasks)
+		errChan := make(chan error, len(executionOrder))
+
+		for _, stepName := range executionOrder {
+			if _, shouldSkip := skipSet[stepName]; shouldSkip {
+				state.logger.Warn("Skipping step as requested", "step", stepName)
+				continue
+			}
+
+			wg.Add(1)
+			go func(name string) {
+				defer wg.Done()
+				logger.Info(fmt.Sprintf("Starting scan step: %s", name))
+				concurrencyLimit <- struct{}{}
+				defer func() { <-concurrencyLimit }()
+
+				if err := workflow[name](state); err != nil {
+					logger.Error("A scan step failed", "step", name, "error", err)
+					errChan <- fmt.Errorf("step %s failed: %w", name, err)
+				}
+			}(stepName)
+		}
+		wg.Wait()
+		close(errChan)
 	}
-
-	wg.Wait()
-	close(errChan)
-
 	logger.Info("Vulnerability scan process completed.")
-	// Podemos decidir no futuro se queremos agregar os erros de `errChan`. Por enquanto, eles já são logados.
 	return generateScanSummary(state)
 }
 
@@ -181,7 +289,7 @@ type WAFResult struct {
 
 // loadWAFResults lê o arquivo waf_results.json e popula o wafMap no estado do scan.
 func loadWAFResults(s *scanState) error {
-	if !config.Cfg.Engine.WAF.Enabled || !recon.FileExistsAndIsNotEmpty(s.wafResultsFile) {
+	if !config.Cfg.Engine.WAF.Enabled || !utils.FileExistsAndIsNotEmpty(s.wafResultsFile) {
 		s.logger.Debug("WAF detection disabled or results file not found, skipping loading.", "file", s.wafResultsFile)
 		return nil // WAF desabilitado ou arquivo não existe, nada a fazer.
 	}
@@ -222,30 +330,83 @@ func loadWAFResults(s *scanState) error {
 	return nil
 }
 
+func stepRunPostScanAnalysis(s *scanState) error {
+	s.logger.Info("--- Starting: Post-Scan Analysis and Consolidation ---")
+
+	// Parse Nuclei results
+	nucleiFindings, err := analysis.ParseNucleiResults(s.nucleiScanFile, s.logger)
+	if err != nil {
+		s.logger.Warn("Failed to parse Nuclei results for summary", "error", err)
+	}
+	s.parsedNucleiFindings = append(s.parsedNucleiFindings, nucleiFindings...)
+
+	// Parse httpx vulnerability results
+	httpxVulnFindings, err := analysis.ParseHttpxVulnerabilityResults(s.vulnerabilityFile, s.logger)
+	if err != nil {
+		s.logger.Warn("Failed to parse httpx vulnerability results for summary", "error", err)
+	}
+	s.parsedHttpxVulnFindings = httpxVulnFindings
+
+	// Parse Nikto results
+	niktoFindings, err := analysis.ParseNiktoResults(s.niktoScanFile, s.logger)
+	if err != nil {
+		s.logger.Warn("Failed to parse Nikto results for summary", "error", err)
+	}
+	s.parsedNiktoFindings = append(s.parsedNiktoFindings, niktoFindings...)
+
+	// Parse ffuf results
+	ffufResultsDir := filepath.Join(filepath.Dir(s.apiFuzzFile), "ffuf_results") // Assuming ffuf results are in a subdir
+	ffufFindings, err := analysis.ParseFfufResults(ffufResultsDir, s.logger)
+	if err != nil {
+		s.logger.Warn("Failed to parse ffuf results for summary", "error", err)
+	}
+	s.parsedFfufFindings = append(s.parsedFfufFindings, ffufFindings...)
+
+	// Parse dirsearch results
+	dirsearchResultsDir := filepath.Join(filepath.Dir(s.apiFuzzFile), "dirsearch_results") // Assuming dirsearch results are in a subdir
+	dirsearchFindings, err := analysis.ParseDirsearchResults(dirsearchResultsDir, s.logger)
+	if err != nil {
+		s.logger.Warn("Failed to parse dirsearch results for summary", "error", err)
+	}
+	s.parsedDirsearchFindings = append(s.parsedDirsearchFindings, dirsearchFindings...)
+
+	// Parse CVE results
+	cveFindings, err := analysis.ParseCVEResults(s.cveScanFile, s.logger)
+	if err != nil {
+		s.logger.Warn("Failed to parse CVE results for summary", "error", err)
+	}
+	s.parsedCVEFindings = append(s.parsedCVEFindings, cveFindings...)
+
+	// Parse OWASP results (que também são do Nuclei)
+	owaspFindings, err := analysis.ParseNucleiResults(s.owaspScanFile, s.logger)
+	if err == nil {
+		s.parsedNucleiFindings = append(s.parsedNucleiFindings, owaspFindings...)
+	}
+	// TODO: Add parsing for OWASP results (currently just Nuclei, so covered)
+
+	s.logger.Info("Post-scan analysis completed.")
+	return nil
+}
+
 func stepRunVulnerabilityTests(s *scanState) error {
 	s.logger.Info("--- Starting: Basic Vulnerability Tests (XSS, SQLi) ---")
-	if !recon.FileExistsAndIsNotEmpty(s.urlsFile) {
-		s.logger.Warn("Input file for vulnerability tests is empty, skipping.", "file", s.urlsFile)
+	// Agora usa o arquivo de URLs já filtrado (liveSubdomainsFile aponta para ele).
+	if !utils.FileExistsAndIsNotEmpty(s.liveSubdomainsFile) {
+		s.logger.Warn("Input file for vulnerability tests is empty after filtering, skipping.", "file", s.liveSubdomainsFile)
 		return nil
 	}
 
-	xssPayloads := `"><script>alert('XSS')</script>,'"--> </style></scRipt><scRipt>alert('XSS')</scRipt>`
-	args := []string{
-		"-l", s.urlsFile, "-o", s.vulnerabilityFile, "-silent", "-no-color",
-		"-threads", fmt.Sprintf("%d", config.Cfg.Engine.MaxParallelTasks), "-tmp-dir", s.tempDir,
-		"-timeout", "10", "-random-agent", "-xss", "-xss-payload", xssPayloads,
-		"-sqli", "-unsafe", "-crlf", "-ssti",
-	}
-
-	if _, err := executeCommand(s.ctx, s.logger, "httpx", args...); err != nil {
+	err := tools.RunHttpxVulnerabilityScan(s.ctx, s.liveSubdomainsFile, s.vulnerabilityFile, s.tempDir, s.logger)
+	if err != nil {
 		// httpx pode retornar um código de saída diferente de zero se não conseguir se conectar a nenhuma URL.
 		// Tratamos isso como um aviso em vez de um erro fatal para não interromper o fluxo do 'chain'.
 		s.logger.Warn("httpx (vulnerability) step finished with a non-zero exit code. This can happen if no URLs were reachable.", "error", err)
 	}
 
-	if recon.FileExistsAndIsNotEmpty(s.vulnerabilityFile) {
+	if utils.FileExistsAndIsNotEmpty(s.vulnerabilityFile) {
 		s.logger.Info("Vulnerability testing completed", "output_file", s.vulnerabilityFile)
 	}
+
 	return nil
 }
 
@@ -253,9 +414,10 @@ func stepRunNucleiScan(s *scanState) error {
 	s.logger.Info("--- Starting: Vulnerability Scanning (Nuclei) ---")
 	err := runNucleiScan(s, config.Cfg.Recon.Nuclei.Templates)
 	if err != nil {
+		s.logger.Warn("Nuclei scan encountered errors, but analysis will proceed with available data.", "error", err)
 		return err
 	}
-	if recon.FileExistsAndIsNotEmpty(s.nucleiScanFile) {
+	if utils.FileExistsAndIsNotEmpty(s.nucleiScanFile) {
 		s.logger.Info("Nuclei scan completed", "output_file", s.nucleiScanFile)
 	}
 	return nil
@@ -264,10 +426,11 @@ func stepRunNucleiScan(s *scanState) error {
 func stepRunCVESearch(s *scanState) error {
 	s.logger.Info("--- Starting: Known Vulnerability Search (CVE API) ---")
 	err := runCVESearch(s.ctx, s.techFile, s.cveScanFile, s.logger)
+	// The actual parsing for summary is done in stepRunPostScanAnalysis
 	if err != nil {
 		return err
 	}
-	if recon.FileExistsAndIsNotEmpty(s.cveScanFile) {
+	if utils.FileExistsAndIsNotEmpty(s.cveScanFile) {
 		s.logger.Info("CVE search completed", "output_file", s.cveScanFile)
 	}
 	return nil
@@ -292,7 +455,7 @@ func stepRunOWASPTests(s *scanState) error {
 	if err != nil {
 		return err
 	}
-	if recon.FileExistsAndIsNotEmpty(s.owaspScanFile) {
+	if utils.FileExistsAndIsNotEmpty(s.owaspScanFile) {
 		s.logger.Info("OWASP Top 10 tests completed", "output_file", s.owaspScanFile)
 	} else {
 		s.logger.Info("OWASP Top 10 tests completed with no findings.")
@@ -306,19 +469,19 @@ func stepRunNikto(s *scanState) error {
 	if err != nil {
 		return err
 	}
-	if recon.FileExistsAndIsNotEmpty(s.niktoScanFile) {
+	if utils.FileExistsAndIsNotEmpty(s.niktoScanFile) {
 		s.logger.Info("Nikto scan completed", "output_file", s.niktoScanFile)
 	}
 	return nil
 }
 
-func stepRunBBot(s *scanState) error {
+func stepRunBBot(s *scanState, isAggressive bool) error {
 	s.logger.Info("--- Starting: Full-scope Recon (BBot) ---")
-	err := runBBot(s.ctx, s.target, s.bbotScanFile, s.tempDir, s.logger)
+	err := tools.RunBBot(s.ctx, []string{s.target}, s.bbotScanFile, s.tempDir, config.Cfg.Recon.BBot.Profile, isAggressive, s.logger)
 	if err != nil {
 		return err
 	}
-	if recon.FileExistsAndIsNotEmpty(s.bbotScanFile) {
+	if utils.FileExistsAndIsNotEmpty(s.bbotScanFile) {
 		s.logger.Info("BBot scan completed", "output_file", s.bbotScanFile)
 	}
 	return nil
@@ -388,6 +551,13 @@ func stepRunAPIFuzzing(s *scanState) error {
 		return nil
 	}
 
+	// Adiciona verificação da wordlist, que estava faltando.
+	fuzzWordlist := config.Cfg.Wordlists.Fuzzing
+	if !utils.FileExistsAndIsNotEmpty(fuzzWordlist) {
+		s.logger.Warn("Fuzzing wordlist not configured or file not found, skipping API fuzzing.", "file", fuzzWordlist)
+		return nil
+	}
+
 	// 4. Cria um arquivo de wordlist temporário com os endpoints encontrados
 	// Usa o diretório temporário do scan para manter tudo contido.
 	endpointListPath := filepath.Join(s.tempDir, "api_endpoints.txt")
@@ -409,7 +579,7 @@ func stepRunAPIFuzzing(s *scanState) error {
 	s.logger.Info("Found endpoints to test", "count", len(endpoints))
 
 	// Adiciona uma verificação explícita para o liveSubdomainsFile, que é necessário para o ffuf.
-	if !recon.FileExistsAndIsNotEmpty(s.liveSubdomainsFile) {
+	if !utils.FileExistsAndIsNotEmpty(s.liveSubdomainsFile) {
 		s.logger.Warn("Live subdomains file does not exist or is empty, skipping API fuzzing.", "file", s.liveSubdomainsFile)
 		return nil
 	}
@@ -424,17 +594,13 @@ func stepRunAPIFuzzing(s *scanState) error {
 		s.logger.Info("Applying default WAF rate limit for API Fuzzing (ffuf).", "rate_limit", ffufRateLimit)
 	}
 
-	// A função RunFfuf agora aceita um rateLimit.
-	return recon.RunFfuf(s.ctx, s.liveSubdomainsFile, endpointListFile.Name(), s.apiFuzzFile, ffufRateLimit, s.logger)
+	// O caminho de saída do ffuf agora é um diretório
+	ffufOutputDir := filepath.Join(s.resultsPath, "ffuf_results")
+	return tools.RunFfuf(s.ctx, s.liveSubdomainsFile, fuzzWordlist, ffufOutputDir, ffufRateLimit, s.logger)
 }
 
 func runNucleiScan(s *scanState, templates []string) error {
-	if !recon.CommandExists("nuclei") {
-		s.logger.Error("nuclei command not found in PATH. Please install it to proceed.", "tool", "nuclei")
-		return fmt.Errorf("nuclei not found in PATH")
-	}
-
-	if !recon.FileExistsAndIsNotEmpty(s.liveSubdomainsFile) {
+	if !utils.FileExistsAndIsNotEmpty(s.liveSubdomainsFile) {
 		s.logger.Warn("Input file for Nuclei does not exist or is empty, skipping.", "file", s.liveSubdomainsFile)
 		return nil
 	}
@@ -445,7 +611,7 @@ func runNucleiScan(s *scanState, templates []string) error {
 
 	// 1. Agrupar hosts por WAF detectado
 	groupedHosts := make(map[string][]string) // Chave: nome do WAF ou "none"
-	allHosts, err := recon.ReadLines(s.liveSubdomainsFile)
+	allHosts, err := utils.ReadLines(s.liveSubdomainsFile)
 	if err != nil {
 		return fmt.Errorf("failed to read hosts for Nuclei: %w", err)
 	}
@@ -485,49 +651,27 @@ func runNucleiScan(s *scanState, templates []string) error {
 		}
 		tempInputFile.Close()
 
-		// 3. Montar os argumentos do Nuclei com o perfil de evasão correto
-		args := []string{
-			"-l", tempInputFile.Name(),
-			"-o", s.nucleiScanFile, // Anexa a saída ao mesmo arquivo de resultados
-			"-silent", "-no-color",
-			"-retries", "2", "-timeout", "10",
-			"-tmp-dir", s.tempDir,
-		}
+		var useDefaultConcurrency bool
+		var wafProfile config.WAFProfile
 
-		// Adiciona os templates
-		for _, t := range templates {
-			args = append(args, "-t", t)
-		}
-
-		// Aplica o perfil de evasão
 		if wafName == "none" {
 			s.logger.Info("Running Nuclei for hosts with no WAF detected.", "host_count", len(hosts))
-			// Usa parâmetros de alta concorrência para hosts sem WAF
-			args = append(args, "-bulk-size", "50", "-c", "25")
+			useDefaultConcurrency = true
 		} else {
-			profile, ok := config.Cfg.Engine.WAF.Profiles[wafName]
+			useDefaultConcurrency = false
+			p, ok := config.Cfg.Engine.WAF.Profiles[wafName]
 			if !ok {
-				profile = config.Cfg.Engine.WAF.DefaultProfile
+				wafProfile = config.Cfg.Engine.WAF.DefaultProfile
 				s.logger.Info("Running Nuclei with default WAF profile.", "waf", wafName, "host_count", len(hosts))
 			} else {
+				wafProfile = p
 				s.logger.Info("Running Nuclei with specific WAF profile.", "waf", wafName, "host_count", len(hosts))
-			}
-
-			// Aplica os limites do perfil
-			if profile.RateLimit > 0 {
-				args = append(args, "-rate-limit", fmt.Sprintf("%d", profile.RateLimit))
-			}
-			if profile.Concurrency > 0 {
-				// Nuclei usa '-c' para concorrência
-				args = append(args, "-c", fmt.Sprintf("%d", profile.Concurrency))
-			}
-			if profile.ProxyFile != "" && recon.FileExistsAndIsNotEmpty(profile.ProxyFile) {
-				args = append(args, "-proxy", profile.ProxyFile)
 			}
 		}
 
 		// 4. Executar o comando
-		if _, err := executeCommand(s.ctx, s.logger, "nuclei", args...); err != nil {
+		err = tools.RunNuclei(s.ctx, tempInputFile.Name(), s.nucleiScanFile, s.tempDir, templates, wafProfile, useDefaultConcurrency, s.logger)
+		if err != nil {
 			s.logger.Warn("Nuclei scan for group finished with a non-zero exit code. This is often normal.", "group", wafName, "error", err)
 		}
 	}
@@ -535,19 +679,96 @@ func runNucleiScan(s *scanState, templates []string) error {
 	return nil
 }
 
-func runNikto(s *scanState) error {
-	if !recon.CommandExists("nikto") {
-		s.logger.Error("nikto command not found in PATH. Please install it to proceed.", "tool", "nikto")
-		return fmt.Errorf("nikto not found in PATH")
+func stepRunDalfox(s *scanState) error {
+	s.logger.Info("--- Starting: Advanced XSS Scanning (Dalfox) ---")
+	// Dalfox roda sobre a lista unificada de alvos
+	err := tools.RunDalfox(s.ctx, s.liveSubdomainsFile, s.dalfoxScanFile, s.tempDir, s.logger)
+	if err != nil {
+		// O erro já é logado pela ferramenta, aqui apenas retornamos para o fluxo principal.
+		return err
+	}
+	if utils.FileExistsAndIsNotEmpty(s.dalfoxScanFile) {
+		s.logger.Info("Dalfox XSS scan completed", "output_file", s.dalfoxScanFile)
+	}
+	return nil
+}
+
+func stepRunParamSpider(s *scanState) error {
+	s.logger.Info("--- Starting: Parameter Discovery for IDOR/BAC (ParamSpider) ---")
+
+	// 1. Lê a lista de URLs filtradas.
+	urls, err := utils.ReadLines(s.liveSubdomainsFile)
+	if err != nil {
+		return fmt.Errorf("failed to read filtered targets for ParamSpider: %w", err)
+	}
+	if len(urls) == 0 {
+		s.logger.Warn("Filtered target list is empty, skipping ParamSpider.", "file", s.liveSubdomainsFile)
+		return nil
 	}
 
-	if !recon.FileExistsAndIsNotEmpty(s.liveSubdomainsFile) {
+	// 2. Extrai domínios únicos da lista de URLs.
+	uniqueDomains := make(map[string]struct{})
+	for _, u := range urls {
+		parsedURL, err := url_pkg.Parse(u)
+		if err == nil && parsedURL.Hostname() != "" {
+			uniqueDomains[parsedURL.Hostname()] = struct{}{}
+		}
+	}
+
+	s.logger.Info("Extracted unique domains for ParamSpider", "count", len(uniqueDomains))
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	allFoundParams := make(map[string]struct{})
+	concurrencyLimit := make(chan struct{}, config.Cfg.Engine.MaxParallelTasks)
+
+	// 3. Executa o ParamSpider para cada domínio único em paralelo.
+	for domain := range uniqueDomains {
+		wg.Add(1)
+		concurrencyLimit <- struct{}{}
+		go func(d string) {
+			defer wg.Done()
+			defer func() { <-concurrencyLimit }()
+
+			// A função RunParamSpider agora espera um domínio, não um arquivo.
+			foundURLs, err := tools.RunParamSpider(s.ctx, d, s.logger)
+			if err != nil {
+				s.logger.Warn("ParamSpider failed for a domain, but continuing.", "domain", d, "error", err)
+				return
+			}
+
+			if len(foundURLs) > 0 {
+				mu.Lock()
+				for _, foundURL := range foundURLs {
+					allFoundParams[foundURL] = struct{}{}
+				}
+				mu.Unlock()
+			}
+		}(domain)
+	}
+	wg.Wait()
+
+	// 4. Salva todos os resultados combinados no arquivo final.
+	err = utils.WriteLines(s.paramSpiderFile, allFoundParams)
+
+	if utils.FileExistsAndIsNotEmpty(s.paramSpiderFile) {
+		s.logger.Info("ParamSpider discovery completed", "output_file", s.paramSpiderFile)
+
+		// Adiciona os novos URLs encontrados à lista principal de alvos do scan para que outras ferramentas os utilizem.
+		return utils.CombineAndDeduplicateFiles(s.liveSubdomainsFile, s.paramSpiderFile)
+	}
+	return nil
+
+}
+
+func runNikto(s *scanState) error {
+	if !utils.FileExistsAndIsNotEmpty(s.liveSubdomainsFile) {
 		s.logger.Warn("Input file for Nikto does not exist or is empty, skipping.", "file", s.liveSubdomainsFile)
 		return nil
 	}
 
 	s.logger.Info("Executing external nikto command in parallel.")
-	hosts, err := recon.ReadLines(s.liveSubdomainsFile)
+	hosts, err := utils.ReadLines(s.liveSubdomainsFile)
 	if err != nil {
 		return fmt.Errorf("failed to read hosts for Nikto: %w", err)
 	}
@@ -576,48 +797,14 @@ func runNikto(s *scanState) error {
 				defer wg.Done()
 				defer func() { <-concurrencyLimit }()
 				s.logger.Debug("Running Nikto scan", "host", h)
-				parsedURL, err := url_pkg.Parse(h)
-				if err != nil {
-					s.logger.Warn("Failed to parse host URL for Nikto, skipping", "host", h, "error", err)
-					return
-				}
-				// O argumento '-Format' foi removido. Nikto agora imprimirá para stdout,
-				// que é capturado pelo `stdoutBuf`. O '-Format' requer um argumento '-o'
-				// que não estamos usando aqui, causando o erro.
-				// Tuning: 1 (Interesting File), 2 (Misconfiguration), 3 (Information Disclosure),
-				// 4 (Injection), 5 (Remote File Retrieval), b (Software Identification).
-				// Maxtime: Evita que o scan fique preso em um único host.				
-				args := []string{"-h", parsedURL.Hostname(), "-Tuning", "1,2,3,4,5,b", "-maxtime", "10m"}
 
-				// Lógica de evasão de WAF dinâmica para Nikto
-				if wafName, found := s.wafMap[parsedURL.Hostname()]; found {
-					profile, ok := config.Cfg.Engine.WAF.Profiles[wafName]
-					if !ok {
-						profile = config.Cfg.Engine.WAF.DefaultProfile // Usa o padrão se não houver perfil específico
-						s.logger.Debug("No specific WAF profile found, using default.", "waf", wafName)
-					}
-
-					// Nikto usa -Pause em segundos (float) entre os testes.
-					// O inverso do rate_limit é um bom começo.
-					if profile.RateLimit > 0 {
-						pauseSeconds := 1.0 / float64(profile.RateLimit)
-						args = append(args, "-Pause", fmt.Sprintf("%.2f", pauseSeconds))
-						s.logger.Info("Applying dynamic WAF evasion for Nikto.", "host", h, "waf", wafName, "pause", pauseSeconds)
-					}
-				} else if config.Cfg.Engine.WAF.Enabled {
-					s.logger.Debug("WAF evasion enabled, but no WAF detected for this host. Running Nikto at normal speed.", "host", h)
-				}
-				
-				if parsedURL.Scheme == "https" {
-					args = append(args, "-ssl")
-				}
-				if port := parsedURL.Port(); port != "" {
-					args = append(args, "-p", port)
+				parsedURL, _ := url_pkg.Parse(h)
+				wafName := ""
+				if parsedURL != nil {
+					wafName = s.wafMap[parsedURL.Hostname()]
 				}
 
-				// A função executeCommand agora lida com o diretório e captura de saída.
-				// Nikto é executado no diretório temporário para evitar que ele crie arquivos em locais inesperados.
-				stdout, err := executeCommand(s.ctx, s.logger, "nikto", args...)
+				stdout, err := tools.RunNikto(s.ctx, h, s.tempDir, wafName, s.logger)
 				if err != nil {
 					s.logger.Warn("Nikto scan for host completed with a non-zero exit code. This can be normal.", "host", h, "error", err)
 				}
@@ -634,77 +821,77 @@ func runNikto(s *scanState) error {
 	return nil
 }
 
-func runBBot(ctx context.Context, target, outputFile, tempDir string, logger *slog.Logger) error {
-	if !recon.CommandExists("bbot") {
-		logger.Error("bbot command not found in PATH. Please install it to proceed.", "tool", "bbot")
-		return fmt.Errorf("bbot not found in PATH")
-	}
-
-	logger.Info("Executing external bbot command.")
-	preset := config.Cfg.Recon.BBot.Profile
-	if preset == "" {
-		preset = "recon-light" // Perfil padrão
-	}
-	logger.Info("Using bbot preset", "preset", preset)
-
-	args := []string{
-		"-t", target,
-		"-p", preset,
-		"-o", outputFile,
-		"--temp-dir", tempDir,
-		"-om", "json",
-		"-y", "-f",
-	}
-	if _, err := executeCommand(ctx, logger, "bbot", args...); err != nil {
-		return fmt.Errorf("bbot execution failed: %w", err)
-	}
-
-	return nil
-}
-
 func runCVESearch(ctx context.Context, techFile, outputFile string, logger *slog.Logger) error {
 	// Esta função é complexa e depende de structs agora localizadas no pacote `types`.
 	// A lógica permanece no pacote `recon` para evitar duplicação de código.
-	// Por simplicidade, vamos chamar a função pública do pacote recon.
+	// A chamada foi movida para o pacote `recon` para evitar dependências circulares.
 	return recon.RunCVESearch(ctx, techFile, outputFile, logger)
 }
 
+// generateScanSummary gera um sumário mais inteligente dos resultados do scan.
 func generateScanSummary(state *scanState) (string, []string, error) {
 	var summary strings.Builder
 	summary.WriteString(fmt.Sprintf("✅ **Scan Summary for: %s**\n\n", state.target))
 
-	countLines := func(path string) int {
-		if !recon.FileExistsAndIsNotEmpty(path) {
-			return 0
+	// Nuclei Findings
+	nucleiCount := len(state.parsedNucleiFindings)
+	if nucleiCount > 0 {
+		summary.WriteString(fmt.Sprintf("• **Vulnerabilities (Nuclei):** %d findings detected.\n", nucleiCount))
+		// Opcional: listar as mais críticas
+		for _, f := range state.parsedNucleiFindings {
+			if f.Info.Severity == "critical" || f.Info.Severity == "high" {
+				summary.WriteString(fmt.Sprintf("  - [%s] %s @ %s\n", strings.ToUpper(f.Info.Severity), f.Info.Name, f.Host))
+			}
 		}
-		file, err := os.Open(path)
-		if err != nil {
-			return 0
-		}
-		defer file.Close()
-		scanner := bufio.NewScanner(file)
-		count := 0
-		for scanner.Scan() {
-			count++
-		}
-		return count
+	} else {
+		summary.WriteString("• **Vulnerabilities (Nuclei):** No findings detected.\n")
 	}
 
-	summary.WriteString(fmt.Sprintf("• **Nuclei Findings:** %d\n", countLines(state.nucleiScanFile)))
-	summary.WriteString(fmt.Sprintf("• **OWASP Top 10 Findings:** %d\n", countLines(state.owaspScanFile)))
-	summary.WriteString(fmt.Sprintf("• **Basic Vulnerabilities (XSS/SQLi):** %d\n", countLines(state.vulnerabilityFile)))
-	summary.WriteString(fmt.Sprintf("• **Known CVEs Found:** %d\n", countLines(state.cveScanFile)))
+	// Basic Vulnerabilities (XSS/SQLi) from httpx
+	httpxVulnCount := len(state.parsedHttpxVulnFindings)
+	if httpxVulnCount > 0 {
+		summary.WriteString(fmt.Sprintf("• **Injection Tests (httpx):** %d potential findings (XSS, SQLi, etc.).\n", httpxVulnCount))
+		for _, f := range state.parsedHttpxVulnFindings {
+			summary.WriteString(fmt.Sprintf("  - %s @ %s\n", f.Type, f.URL))
+		}
+	} else {
+		summary.WriteString("• **Injection Tests (httpx):** No findings.\n")
+	}
+
+	// Nikto Findings
+	niktoCount := len(state.parsedNiktoFindings)
+	if niktoCount > 0 {
+		summary.WriteString(fmt.Sprintf("• **Web Server Scan (Nikto):** %d potential issues identified.\n", niktoCount))
+	} else {
+		summary.WriteString("• **Web Server Scan (Nikto):** No significant findings.\n")
+	}
+
+	// Known CVEs Found
+	cveCount := len(state.parsedCVEFindings)
+	if cveCount > 0 {
+		summary.WriteString(fmt.Sprintf("• **Known CVEs:** %d potential CVEs related to detected technologies.\n", cveCount))
+		for _, cve := range state.parsedCVEFindings {
+			summary.WriteString(fmt.Sprintf("  - [%s] %s (%s)\n", cve.Severity, cve.CVE_ID, cve.Technology))
+		}
+	} else {
+		summary.WriteString("• **Known CVEs:** No direct CVEs found for detected technologies.\n")
+	}
+
+	// Fuzzing Findings (ffuf + dirsearch)
+	totalFuzzFindings := len(state.parsedFfufFindings) + len(state.parsedDirsearchFindings)
+	if totalFuzzFindings > 0 {
+		summary.WriteString(fmt.Sprintf("• **Fuzzing:** %d interesting paths/responses found.\n", totalFuzzFindings))
+	} else {
+		summary.WriteString("• **Fuzzing:** No interesting paths or responses found.\n")
+	}
 
 	summary.WriteString(fmt.Sprintf("\n*Full scan results are saved in:* `%s`", state.resultsPath))
 
 	resultFiles := []string{
-		state.nucleiScanFile,
-		state.cveScanFile,
-		state.owaspScanFile,
-		state.vulnerabilityFile,
-		state.niktoScanFile,
-		state.bbotScanFile,
-		state.apiFuzzFile,
+		state.nucleiScanFile, state.cveScanFile, state.owaspScanFile,
+		state.vulnerabilityFile, state.niktoScanFile, state.bbotScanFile,
+		state.dalfoxScanFile, state.paramSpiderFile, // Adicionado
+		state.apiFuzzFile, // This is a directory for ffuf, but we list it for completeness
 	}
 
 	return summary.String(), resultFiles, nil

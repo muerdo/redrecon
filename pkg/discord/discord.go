@@ -12,7 +12,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"redrecon/internal/config"
-	"redrecon/pkg/recon"
+	"redrecon/pkg/utils"
+	"redrecon/pkg/taskmanager"
 	"redrecon/pkg/target"
 	"redrecon/pkg/types"
 	"redrecon/pkg/search"
@@ -30,9 +31,12 @@ var (
 // Command Handlers to be set by the main application to break import cycles.
 var (
 	StartMonitorFunc func(targets []string, frequency time.Duration)
+	StartReconFunc   func(taskIdentifier, rootTarget string, initialSubdomains, skipSteps []string, skipAnalysis, followRedirects, isInteractive, useResolvedForScan bool, logger *slog.Logger) (string, []string, bool, error)
+	StartRunFunc     func(ctx context.Context, initialTarget string, reconSkipSteps, scanSkipSteps, scanOnlySteps []string, isAggressive, skipAnalysis, forceScan bool, logger *slog.Logger) (string, []string, error)
 	StartInfraFunc   func(taskIdentifier, target string, skipSteps []string, logger *slog.Logger) (string, []string, error)
-	StartScanFunc    func(taskIdentifier, target string, skipSteps, onlySteps []string, logger *slog.Logger) (string, []string, error)
+	StartScanFunc    func(ctx context.Context, taskIdentifier string, skipSteps, onlySteps []string, isAggressive, isInteractive bool, logger *slog.Logger) (string, []string, error)
 	StartWebFunc     func(taskIdentifier, target string, depth int, logger *slog.Logger) (string, []string, error)
+	StartAPIFunc     func(taskIdentifier string, skipSteps []string, logger *slog.Logger) (string, []string, error) // Novo: Função para o modo API
 )
 
 // IsDiscordBotEnabled verifica se o bot do Discord está habilitado na configuração.
@@ -63,87 +67,16 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 		return
 	}
 
-	// Cria um logger padrão que escreve no console (onde o bot está rodando), não no Discord.
-	// Isso mantém o canal do Discord limpo, mostrando apenas as mensagens de status.
-	consoleLogger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-
 	command := strings.ToLower(args[0])
 	cmdArgs := args[1:]
 
 	go func() { // Run command in a goroutine to not block the bot
-		// defer discordWriter.Flush() // This was removed in a previous step, ensuring it stays removed.
+		// Cria um logger que escreve diretamente no canal do Discord para esta execução.
+		discordWriter := NewDiscordWriter(s, m.ChannelID)
+		discordLogger := slog.New(slog.NewTextHandler(discordWriter, nil))
+		defer discordWriter.Flush() // Garante que qualquer log restante no buffer seja enviado.
 
-		switch command { case "recon":
-			if len(cmdArgs) < 1 {
-				s.ChannelMessageSend(m.ChannelID, "Uso: `!recon <target>`")
-				return
-			}
-
-			// Analisa os argumentos para encontrar o alvo e a flag --no-redirects
-			var taskName string
-			var targetArg string
-			followRedirects := true
-			for i := 0; i < len(cmdArgs); i++ {
-				arg := cmdArgs[i]
-				switch arg {
-				case "-n", "--task-name":
-					if i+1 < len(cmdArgs) {
-						taskName = cmdArgs[i+1]
-						i++
-					}
-				case "--no-redirects":
-					followRedirects = false
-				default:
-					targetArg = arg
-				}
-			}
-
-			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("⏳ Iniciando reconhecimento para `%s`... Isso pode levar algum tempo.", targetArg))
-			
-			taskIdentifier := target.GetRootDomain(targetArg)
-			if taskName != "" {
-				taskIdentifier = taskName // Usa o nome da tarefa como identificador do diretório
-			}
-			rootTarget := target.GetRootDomain(targetArg) // O alvo real para as ferramentas
-
-			summary, files, err := recon.StartRecon(taskIdentifier, rootTarget, []string{targetArg}, []string{}, followRedirects, false, consoleLogger)
-			if err != nil {
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Reconhecimento para `%s` falhou: %v", targetArg, err))
-			} else {
-				SendSummaryAndFiles(s, m.ChannelID, summary, files)
-			}
-		case "infra":
-			if len(cmdArgs) < 1 {
-				s.ChannelMessageSend(m.ChannelID, "Uso: `!infra <target>`")
-				return
-			}
-
-			// Analisa os argumentos para encontrar o alvo e a flag --no-redirects
-			var taskName string
-			var targetArg string			
-			for i := 0; i < len(cmdArgs); i++ {
-				arg := cmdArgs[i]
-				switch arg {
-				case "-n", "--task-name":
-					if i+1 < len(cmdArgs) {
-						taskName = cmdArgs[i+1]
-						i++
-					}
-				default:
-					if targetArg == "" {
-						targetArg = arg
-					}
-				}
-			}
-
-			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("⏳ Iniciando varredura de infraestrutura para `%s`...", targetArg))
-			if StartInfraFunc != nil {
-				if summary, files, err := StartInfraFunc(taskName, targetArg, []string{}, consoleLogger); err != nil { // Passa taskName e targetArg
-					s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Varredura de infraestrutura para `%s` falhou (Task: %s): %v", targetArg, taskName, err))
-				} else {
-					SendSummaryAndFiles(s, m.ChannelID, summary, files)
-				}
-			}
+		switch command {
 		case "monitor":
 			if len(cmdArgs) < 1 {
 				s.ChannelMessageSend(m.ChannelID, "Uso: `!monitor <target> [frequency]`")
@@ -169,7 +102,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 
 			frequency, _ := time.ParseDuration(freqStr) // O erro já foi verificado
 			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Iniciando monitoramento para: `%s` com frequência de %s", strings.Join(targets, ", "), frequency))
-			if StartMonitorFunc != nil {
+			if StartMonitorFunc != nil { // StartMonitorFunc ainda usa slog.Default() para logs internos, mas a notificação inicial vai para o Discord.
 				go StartMonitorFunc(targets, frequency)
 				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("✅ Monitoramento iniciado para `%d` alvo(s).", len(targets)))
 			}
@@ -222,7 +155,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 			if err != nil {
 				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ A busca falhou: %v", err))
 			} else {
-				fileName := fmt.Sprintf("search_results_%s.txt", recon.SanitizeTargetForPath(searchTerm))
+				fileName := fmt.Sprintf("search_results_%s.txt", utils.SanitizeTargetForPath(searchTerm))
 				s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
 					Content: "Resultados da busca:",
 					Files: []*discordgo.File{
@@ -234,97 +167,66 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 				})
 			}
 
-		case "scan":
+		case "run": // Comando unificado 'run'
 			if len(cmdArgs) < 1 {
-				s.ChannelMessageSend(m.ChannelID, "Uso: `!scan <alvo> [--skip step] [--only step]`")
+				s.ChannelMessageSend(m.ChannelID, "Uso: `!run <alvo> [--recon-skip <steps>] [--scan-skip <steps>] [--scan-only <steps>] [--aggressive] [--skip-analysis] [--force-scan]`")
 				return
 			}
 
-			var taskName string
-			var targetArg string
-			var skipSteps []string
-			var onlySteps []string
-			for i, arg := range cmdArgs {
+			var (
+				runTarget         string
+				reconSkipSteps    []string
+				scanSkipSteps     []string
+				scanOnlySteps     []string
+				isAggressive      bool
+				skipAnalysis      bool
+				forceScan         bool
+			)
+
+			runTarget = cmdArgs[0] // Assume o primeiro argumento como o alvo
+
+			// Parser básico de flags para o comando !run
+			for i := 1; i < len(cmdArgs); i++ {
+				arg := cmdArgs[i]
 				switch arg {
-				case "-n", "--task-name":
+				case "--recon-skip":
 					if i+1 < len(cmdArgs) {
-						taskName = cmdArgs[i+1]
+						reconSkipSteps = strings.Split(cmdArgs[i+1], ",")
 						i++
 					}
-				case "--skip":
+				case "--scan-skip":
 					if i+1 < len(cmdArgs) {
-						skipSteps = strings.Split(cmdArgs[i+1], ",")
-						i++ // Pula o próximo argumento
+						scanSkipSteps = strings.Split(cmdArgs[i+1], ",")
+						i++
 					}
-				case "--only":
+				case "--scan-only":
 					if i+1 < len(cmdArgs) {
-						onlySteps = strings.Split(cmdArgs[i+1], ",")
-						i++ // Pula o próximo argumento
+						scanOnlySteps = strings.Split(cmdArgs[i+1], ",")
+						i++
 					}
+				case "--aggressive":
+					isAggressive = true
+				case "--skip-analysis":
+					skipAnalysis = true
+				case "--force-scan":
+					forceScan = true
 				default:
-					if targetArg == "" {
-						targetArg = arg
-					}
+					s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Argumento desconhecido para !run: `%s`", arg))
+					return
 				}
 			}
 
-			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("⏳ Iniciando varredura de vulnerabilidades para `%s`...", targetArg))
-			if StartScanFunc != nil {
-				taskIdentifier := target.GetRootDomain(targetArg)
-				if taskName != "" {
-					taskIdentifier = taskName
-				}
-				summary, files, err := StartScanFunc(taskIdentifier, targetArg, skipSteps, onlySteps, consoleLogger)
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🚀 Iniciando fluxo completo para o alvo: `%s`...", runTarget))
+
+			if StartRunFunc != nil {
+				summary, files, err := StartRunFunc(context.Background(), runTarget, reconSkipSteps, scanSkipSteps, scanOnlySteps, isAggressive, skipAnalysis, forceScan, discordLogger)
 				if err != nil {
-					s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Varredura para `%s` falhou (Task: %s): %v", targetArg, taskIdentifier, err))
+					s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ O fluxo 'run' para `%s` falhou: %v", runTarget, err))
 				} else {
 					SendSummaryAndFiles(s, m.ChannelID, summary, files)
 				}
-			}
-
-		case "chain":
-			if len(cmdArgs) < 1 {
-				s.ChannelMessageSend(m.ChannelID, "Uso: `!chain <alvo> [-n task_name]`")
-				return
-			}
-
-			var taskName string
-			var targetArg string
-			for i, arg := range cmdArgs {
-				switch arg {
-				case "-n", "--task-name":
-					if i+1 < len(cmdArgs) {
-						taskName = cmdArgs[i+1]
-						i++
-					}
-				default:
-					if targetArg == "" {
-						targetArg = arg
-					}
-				}
-			}
-
-			taskIdentifier := target.GetRootDomain(targetArg)
-			if taskName != "" {
-				taskIdentifier = taskName
-			}
-			rootTarget := target.GetRootDomain(targetArg) // O alvo real para as ferramentas
-
-			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🔗 **Iniciando fluxo 'chain' para `%s` (Task: `%s`)**\n\nFase 1: Reconhecimento...", targetArg, taskIdentifier))
-			reconSummary, reconFiles, err := recon.StartRecon(taskIdentifier, rootTarget, []string{targetArg}, []string{}, true, false, consoleLogger)
-			if err != nil {
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Fase de Reconhecimento falhou para `%s`: %v", targetArg, err))
-				return
-			}
-			SendSummaryAndFiles(s, m.ChannelID, reconSummary, reconFiles)
-
-			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("✅ Reconhecimento concluído. Iniciando Fase 2: Varredura de Vulnerabilidades..."))
-			scanSummary, scanFiles, err := StartScanFunc(taskIdentifier, targetArg, []string{}, []string{}, consoleLogger)
-			if err != nil {
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Fase de Varredura falhou para `%s`: %v", targetArg, err))
 			} else {
-				SendSummaryAndFiles(s, m.ChannelID, scanSummary, scanFiles)
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("✅ **Fluxo 'chain' para `%s` concluído com sucesso!**", targetArg))
+				s.ChannelMessageSend(m.ChannelID, "Erro interno: A função 'run' não está configurada.")
 			}
 
 		case "web":
@@ -333,17 +235,11 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 				return
 			}
 
-			var taskName string
 			var targetArg string
 			depth := 2 // Profundidade padrão
 			for i := 0; i < len(cmdArgs); i++ {
 				arg := cmdArgs[i]
 				switch arg {
-				case "-n", "--task-name":
-					if i+1 < len(cmdArgs) {
-						taskName = cmdArgs[i+1]
-						i++
-					}
 				case "-d", "--depth":
 					if i+1 < len(cmdArgs) {
 						fmt.Sscanf(cmdArgs[i+1], "%d", &depth)
@@ -357,47 +253,117 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate, prefix stri
 			}
 
 			taskIdentifier := target.GetRootDomain(targetArg)
-			if taskName != "" {
-				taskIdentifier = taskName
-			}
-
+			
 			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🕸️ Iniciando rastreamento e análise web para `%s` (Profundidade: %d)...", targetArg, depth))
-			summary, files, err := StartWebFunc(taskIdentifier, targetArg, depth, consoleLogger)
+			summary, files, err := StartWebFunc(taskIdentifier, targetArg, depth, discordLogger)
 			if err != nil {
 				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Análise web para `%s` falhou: %v", targetArg, err))
 			} else {
 				SendSummaryAndFiles(s, m.ChannelID, summary, files)
 			}
-
-		case "help":
-			helpMsg := "Comandos disponíveis:\n" +
-				"`!recon <target>` - Inicia um reconhecimento web completo.\n" +
-				"`!infra <target>` - Inicia uma varredura de infraestrutura.\n" +
-				"`!scan <target>` - Inicia uma varredura de vulnerabilidades.\n" +
-				"`!chain <target>` - Executa 'recon' seguido de 'scan'.\n" +
-				"`!web <url>` - Rastreia e analisa um site específico. Flags: `-d <profundidade>`, `-n <nome>`.\n" +
-				"`!monitor <target> [frequency]` - Inicia o monitoramento contínuo (ex: `!monitor example.com 12h`).\n" +
-				"  - Todos os comandos (`recon`, `scan`, `infra`) aceitam a flag `-n <nome>` ou `--task-name <nome>` para agrupar resultados.\n" +
-				"`!search <termo> [flags]` - Procura por um termo nos resultados.\n" +
-				"  - Flags: `-t <alvo>` (para buscar apenas em um alvo), `-l` (listar arquivos), `-r` (usar Regex).\n" +
-				"  - Exemplo: `!search \"api_key\" -t example.com -r`"
-			s.ChannelMessageSend(m.ChannelID, helpMsg)
-		case "results":
+		case "infra":
 			if len(cmdArgs) < 1 {
-				s.ChannelMessageSend(m.ChannelID, "Uso: `!results <alvo>`")
+				s.ChannelMessageSend(m.ChannelID, "Uso: `!infra <alvo>`")
 				return
 			}
 			targetArg := cmdArgs[0]
+			taskIdentifier := target.GetRootDomain(targetArg)
+
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🏗️ Iniciando varredura de infraestrutura para `%s`...", targetArg))
+			summary, files, err := StartInfraFunc(taskIdentifier, targetArg, []string{}, discordLogger)
+			if err != nil {
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Varredura de infra para `%s` falhou: %v", targetArg, err))
+			} else {
+				SendSummaryAndFiles(s, m.ChannelID, summary, files)
+			}
+		case "api":
+			if len(cmdArgs) < 1 {
+				s.ChannelMessageSend(m.ChannelID, "Uso: `!api <task_name>`")
+				return
+			}
+			taskIdentifier := cmdArgs[0]
+
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🔎 Iniciando varredura de API para a tarefa `%s`...", taskIdentifier))
+			summary, files, err := StartAPIFunc(taskIdentifier, []string{}, discordLogger)
+			if err != nil {
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Varredura de API para `%s` falhou: %v", taskIdentifier, err))
+			} else {
+				SendSummaryAndFiles(s, m.ChannelID, summary, files)
+			}
+		case "status":
+			s.ChannelMessageSend(m.ChannelID, "📊 Verificando status das tarefas...")
+			resultsDir := "results"
+			entries, err := os.ReadDir(resultsDir)
+			if err != nil {
+				s.ChannelMessageSend(m.ChannelID, "❌ Erro ao ler o diretório de resultados.")
+				return
+			}
+
+			var tasks []string
+			for _, entry := range entries {
+				if entry.IsDir() {
+					tasks = append(tasks, entry.Name())
+				}
+			}
+
+			if len(tasks) == 0 {
+				s.ChannelMessageSend(m.ChannelID, "🤷 Nenhuma tarefa encontrada no diretório de resultados.")
+				return
+			}
+
+			var response strings.Builder
+			response.WriteString("**Tarefas com Resultados (Iniciadas/Concluídas):**\n")
+			for _, task := range tasks {
+				response.WriteString(fmt.Sprintf("- `%s`\n", task))
+			}
+			s.ChannelMessageSend(m.ChannelID, response.String())
+
+		case "results":
+			if len(cmdArgs) < 1 {
+				s.ChannelMessageSend(m.ChannelID, "Uso: `!results <alvo> [--partial]`")
+				return
+			}
+			targetArg := cmdArgs[0]
+			// A flag --partial é implícita, a função getTargetResults sempre busca o que existe.
 			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🔎 Buscando resultados para o alvo `%s`...", targetArg))
 
 			summary, files, err := getTargetResults(targetArg)
 			if err != nil {
 				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Erro ao buscar resultados para `%s`: %v", targetArg, err))
 			} else if len(files) == 0 {
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🤷 Nenhum arquivo de resultado encontrado para `%s`.", targetArg))
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🤷 Nenhum resultado encontrado para o alvo `%s`.", targetArg))
 			} else {
-				SendSummaryAndFiles(s, m.ChannelID, summary, files) // This was missing a closing brace in the original context, fixed here.
+				SendSummaryAndFiles(s, m.ChannelID, summary, files)
 			}
+		
+		case "stop":
+			if len(cmdArgs) < 1 {
+				s.ChannelMessageSend(m.ChannelID, "Uso: `!stop <nome_da_tarefa>`")
+				return
+			}
+			taskIdentifier := cmdArgs[0]
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("🛑 Tentando cancelar a tarefa: `%s`...", taskIdentifier))
+
+			if err := taskmanager.StopTask(taskIdentifier); err != nil {
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("⚠️ Não foi possível cancelar a tarefa: %v", err))
+			} else {
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("✅ Tarefa `%s` cancelada com sucesso.", taskIdentifier))
+			}
+
+		case "help":
+			helpMsg := "Comandos disponíveis:\n" +
+				"`!run <target>` - Executa um fluxo completo de reconhecimento e varredura.\n" +
+				"`!stop <task_name>` - Cancela uma tarefa em andamento (ex: `!stop example.com`).\n" +
+				"`!infra <target>` - Inicia uma varredura de infraestrutura.\n" +
+				"`!api <task_name>` - Inicia uma varredura de API baseada nos resultados de uma tarefa existente.\n" +
+				"`!web <url>` - Rastreia e analisa um site específico. Flags: `-d <profundidade>`.\n" +
+				"`!monitor <target> [frequency]` - Inicia o monitoramento contínuo (ex: `!monitor example.com 12h`).\n" +
+				"`!status` - Lista todas as tarefas com resultados existentes.\n" +
+				"`!results <alvo> [--partial]` - Mostra o resumo e os arquivos de uma tarefa (mesmo que em andamento).\n" +
+				"`!search <termo> [flags]` - Procura por um termo nos resultados.\n" +
+				"  - Flags: `-t <alvo>` (para buscar apenas em um alvo), `-l` (listar arquivos), `-r` (usar Regex).\n" +
+				"  - Exemplo: `!search \"api_key\" -t example.com -r`"
+			s.ChannelMessageSend(m.ChannelID, helpMsg)
 		default:
 			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Comando desconhecido: `%s`. Use `!help` para ver os comandos.", command))
 		}
@@ -419,7 +385,7 @@ func NewBot() *bot {
 
 // getTargetResults localiza e lista todos os arquivos de resultado para um determinado alvo.
 func getTargetResults(target string) (string, []string, error) {
-	sanitizedTarget := recon.SanitizeTargetForPath(target)
+	sanitizedTarget := utils.SanitizeTargetForPath(target)
 	targetResultsPath := filepath.Join("results", sanitizedTarget)
 
 	if _, err := os.Stat(targetResultsPath); os.IsNotExist(err) {
@@ -579,7 +545,8 @@ func StartBot(token, prefix string) {
 	}
 
 	// Define um cliente HTTP customizado com um timeout maior para lidar com redes lentas.
-	dg.Client = &http.Client{Timeout: 30 * time.Second}
+	// Aumentado para 60 segundos para acomodar redes mais lentas ou com maior latência.
+	dg.Client = &http.Client{Timeout: 60 * time.Second}
 
 	// Get the bot's user ID
 	slog.Info("Connecting to Discord and verifying bot token...")

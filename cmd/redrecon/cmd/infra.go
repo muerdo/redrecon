@@ -13,7 +13,6 @@ import (
 
 var (
 	infraTarget   string
-	infraTaskName string
 	infraSkipSteps []string
 )
 
@@ -45,13 +44,7 @@ var InfraCmd = &cobra.Command{
 		logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 		for _, t := range targetsToScan {
-			var taskIdentifier string
-			if infraTaskName != "" {
-				taskIdentifier = infraTaskName
-			} else {
-				taskIdentifier = t
-			}
-
+			taskIdentifier := t
 			slog.Info("===== STARTING INFRA SCAN =====", "target", t, "task_identifier", taskIdentifier)
 			// Supondo que infra.StartInfra tenha uma assinatura similar a recon.StartRecon
 			summary, _, err := infra.StartInfra(taskIdentifier, t, infraSkipSteps, logger)
@@ -67,6 +60,5 @@ var InfraCmd = &cobra.Command{
 
 func init() {
 	InfraCmd.Flags().StringVarP(&infraTarget, "target", "t", "", "Target for infrastructure scan (domain, IP, file).")
-	InfraCmd.Flags().StringVarP(&infraTaskName, "task-name", "n", "", "Optional name for the task, to group all results under a single directory.")
 	InfraCmd.Flags().StringSliceVarP(&infraSkipSteps, "skip", "s", []string{}, "Comma-separated list of infra steps to skip.")
 }

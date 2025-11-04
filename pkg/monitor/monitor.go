@@ -2,20 +2,19 @@ package monitor
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
 	"redrecon/internal/config"
 	"redrecon/pkg/discord"
-	"redrecon/pkg/recon"
+	"redrecon/pkg/utils"
 	"redrecon/pkg/types"
+	"redrecon/pkg/tools"
 )
 
 // Start inicia o processo de monitoramento para uma lista de alvos.
@@ -45,7 +44,7 @@ func runScanForTarget(target string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute) // Timeout de 30 min por alvo
 	defer cancel()
 
-	sanitizedTarget := recon.SanitizeTargetForPath(target)
+	sanitizedTarget := utils.SanitizeTargetForPath(target)
 	resultsPath := filepath.Join("results", sanitizedTarget, "monitor")
 	if err := os.MkdirAll(resultsPath, 0755); err != nil {
 		slog.Error("Failed to create monitor directory", "path", resultsPath, "error", err)
@@ -60,65 +59,38 @@ func runScanForTarget(target string) {
 
 	// 1. Descoberta de subdomínios
 	subdomainsFile := filepath.Join(resultsPath, "subdomains.txt")
-	if !recon.CommandExists("subfinder") {
-		slog.Error("subfinder command not found in PATH. Skipping subdomain discovery for monitoring.", "tool", "subfinder")
+	subfinderOutput, err := tools.RunSubfinder(ctx, target, tempDir, slog.Default())
+	if err != nil {
+		slog.Error("Subfinder failed during monitoring", "target", target, "error", err)
 		return
 	}
-	slog.Info("Starting subfinder for monitoring", "target", target)
-	argsSubfinder := []string{
-		"-d", target,
-		"-o", subdomainsFile,
-		"-silent",
-		"-t", "50", "-timeout", "30",
-		"-tmp-dir", tempDir, "-max-time", "300",
-	}
-	cmdSubfinder := exec.CommandContext(ctx, config.GetToolPath("subfinder"), argsSubfinder...)
-	var subfinderStderr bytes.Buffer
-	cmdSubfinder.Stderr = &subfinderStderr
-	if err := cmdSubfinder.Run(); err != nil {
-		slog.Error("Subfinder failed during monitoring", "target", target, "error", err, "stderr", subfinderStderr.String())
+	if err := os.WriteFile(subdomainsFile, []byte(subfinderOutput), 0644); err != nil {
+		slog.Error("Subfinder failed during monitoring", "target", target, "error", err)
 		return
 	}
-	if !recon.FileExistsAndIsNotEmpty(subdomainsFile) {
+	if !utils.FileExistsAndIsNotEmpty(subdomainsFile) {
 		slog.Info("Subfinder ran but found no subdomains for target, skipping further steps.", "target", target)
 		return
 	}
 
 	// 2. Descoberta de hosts ativos
 	liveHostsFile := filepath.Join(resultsPath, "live_hosts.txt")
-	if !recon.CommandExists("httpx") {
-		slog.Error("httpx command not found in PATH. Skipping live host discovery for monitoring.", "tool", "httpx")
+	// O arquivo de tecnologia não é usado no monitor, mas é necessário para a assinatura da função.
+	techOutputFile := filepath.Join(tempDir, "tech_monitor.json")
+
+	// CORREÇÃO: Ajusta a chamada para corresponder à nova assinatura da função RunHttpx.
+	err = tools.RunHttpx(ctx, subdomainsFile, techOutputFile, liveHostsFile, tempDir, true, "80,443,8080,8443", false, slog.Default())
+	if err != nil {
+		slog.Error("Httpx failed during monitoring", "target", target, "error", err)
 		return
 	}
-	slog.Info("Starting httpx for monitoring", "target", target)
-	argsHttpx := []string{
-		"-l", subdomainsFile,
-		"-o", liveHostsFile,
-		"-silent",
-		"-threads", "50",
-		"-no-color",
-		"-random-agent", "-timeout", "10",
-		"-tmp-dir", tempDir,
-		"-follow-redirects",
-	}
-	cmdHttpx := exec.CommandContext(ctx, config.GetToolPath("httpx"), argsHttpx...)
-	var httpxStderr bytes.Buffer
-	cmdHttpx.Stderr = &httpxStderr
-	if err := cmdHttpx.Run(); err != nil {
-		slog.Error("Httpx failed during monitoring", "target", target, "error", err, "stderr", httpxStderr.String())
-		return
-	}
-	if !recon.FileExistsAndIsNotEmpty(liveHostsFile) {
+	if !utils.FileExistsAndIsNotEmpty(liveHostsFile) {
 		slog.Info("No live hosts found for target, skipping nuclei scan", "target", target)
 		return
 	}
 
 	// 3. Varredura com Nuclei
 	nucleiResultsFile := filepath.Join(resultsPath, "nuclei_results.json")
-	if !recon.CommandExists("nuclei") {
-		slog.Error("nuclei command not found in PATH. Skipping nuclei scan for monitoring.", "tool", "nuclei")
-		return
-	}
 	templates := config.Cfg.Recon.Nuclei.MonitorTemplates
 	if len(templates) == 0 {
 		slog.Warn("No monitor templates configured for Nuclei. Skipping scan.", "target", target)
@@ -126,22 +98,11 @@ func runScanForTarget(target string) {
 	}
 	slog.Info("Starting Nuclei scan for monitoring", "target", target)
 
-	args := []string{
-		"-l", liveHostsFile,
-		"-o", nucleiResultsFile,
-		"-json",
-		"-silent",
-	}
-	for _, t := range templates {
-		args = append(args, "-t", t)
-	}
-
-	cmdNuclei := exec.CommandContext(ctx, config.GetToolPath("nuclei"), args...)
-	var nucleiStderr bytes.Buffer
-	cmdNuclei.Stderr = &nucleiStderr
-	if err := cmdNuclei.Run(); err != nil {
+	// Para o monitor, usamos o perfil padrão de evasão.
+	err = tools.RunNuclei(ctx, liveHostsFile, nucleiResultsFile, tempDir, templates, config.Cfg.Engine.WAF.DefaultProfile, false, slog.Default())
+	if err != nil {
 		// Nuclei pode sair com erro mesmo que encontre algo, então continuamos
-		slog.Warn("Nuclei scan finished with an error, proceeding with result analysis", "target", target, "error", err, "stderr", nucleiStderr.String())
+		slog.Warn("Nuclei scan finished with an error, proceeding with result analysis", "target", target, "error", err)
 	}
 
 	// 4. Analisar e notificar sobre novas vulnerabilidades

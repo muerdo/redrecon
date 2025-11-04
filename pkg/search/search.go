@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"log/slog"
-	"redrecon/pkg/recon"
+	"redrecon/pkg/utils"
 
 	"github.com/fatih/color"
 )
@@ -30,14 +30,19 @@ func ExecuteSearch(searchTerm, targetScope string, listOnly, useRegex bool) (str
 	basePath := "results"
 	if targetScope != "" {
 		// Se um escopo de alvo é fornecido, o caminho da busca é restrito a esse alvo.
-		basePath = filepath.Join(basePath, recon.SanitizeTargetForPath(targetScope))
+		basePath = filepath.Join(basePath, utils.SanitizeTargetForPath(targetScope))
 		slog.Debug("Search basePath restricted", "basePath", basePath, "targetScope", targetScope)
 	}
 
-	// **NOVA VERIFICAÇÃO**: Garante que o diretório de busca exista.
+	// Garante que o diretório de busca exista.
 	if _, err := os.Stat(basePath); os.IsNotExist(err) {
-		slog.Warn("Search directory does not exist, no search performed.", "path", basePath)
-		return fmt.Sprintf("Nenhum resultado encontrado para o alvo '%s' (diretório não existe).", targetScope), nil
+		if targetScope != "" {
+			slog.Warn("Search directory for target does not exist, no search performed.", "path", basePath)
+			return fmt.Sprintf("Nenhum resultado encontrado para o alvo '%s' (diretório não existe).", targetScope), nil
+		}
+		// Se nenhum alvo foi especificado e o diretório 'results' não existe.
+		slog.Warn("Base 'results' directory does not exist, no search performed.", "path", basePath)
+		return "Diretório 'results' não encontrado. Execute uma varredura primeiro.", nil
 	}
 
 	if useRegex {
