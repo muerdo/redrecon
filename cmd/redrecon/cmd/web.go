@@ -3,8 +3,8 @@ package cmd
 import (
 	"redrecon/pkg/web"
 	"log/slog"
+	"os"
 	"net/url"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"

@@ -2,6 +2,7 @@ package discord
 
 import (
 	"fmt"
+	"context"
 	"os/signal"
 	"syscall"
 
