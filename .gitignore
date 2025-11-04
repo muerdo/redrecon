@@ -4,6 +4,6 @@ redrecon
 
 # Arquivos de configuração locais (não devem ser versionados)
 config.yaml
-
+provider-config.yaml
 # Diretório de resultados
 results/
