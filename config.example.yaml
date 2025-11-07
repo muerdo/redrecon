@@ -1,0 +1,577 @@
+api_keys:
+  github: ""
+  chaos: ""
+  securitytrails: ""
+  shodan: ""
+  binaryedge: ""
+  censys: ""
+  certspotter: ""
+  passivetotal: ""
+
+tools:
+  bbot:
+    enabled: true
+    config_file: ""  # Será gerado automaticamente
+    extra_args:
+      - "--allow-deadly"
+      - "--modules" 
+      - "subdomain-enum,portscan,web-basic,vulnscan,cloudcheck,excavate,speculate,unarchive,apk,docker"
+      - "--output-module" 
+      - "json"
+      - "--quiet"
+      - "--auto-start"
+  httpx:
+    tech_detect: true
+    enabled: true
+  nmap: /usr/bin/nmap
+  sqlmap:
+    enabled: true
+    proxy: ""
+    level: 3
+    risk: 2
+    extra_args: ["--batch"]
+  enum4linux_ng:
+    enabled: true
+    threads: 10
+  ffuf:
+    enabled: true
+    rate_limit: 0
+    proxy: ""
+    extra_args: ["-ac"]
+  nikto:
+    enabled: true
+    pause_seconds: 0
+    proxy: ""
+    extra_args: ["-Format", "json"] # Assegura que a flag e o valor estão separados
+  dirsearch:
+    enabled: true
+    threads: 0
+    proxy: ""
+    extra_args: ["-r"]
+  feroxbuster:
+    enabled: true
+    threads: 0
+    proxy: ""
+    extra_args: ["-q"]
+  gobuster:
+    enabled: true
+    threads: 0
+    proxy: ""
+    extra_args: ["-q"]
+  dalfox:
+    enabled: true
+    proxy: ""
+    extra_args: ["--silence"]
+  paramspider:
+    enabled: true
+    proxy: ""
+    extra_args: []
+  subzy:
+    enabled: true
+    extra_args: ["--hide_fails"]
+  arjun:
+    enabled: true
+    extra_args: []
+  trufflehog:
+    enabled: true
+    path: ""  # Vazio = herda de resultsPath/web/assets
+    entropy: true
+    rules: ""  # Custom rules
+    no_verify: false  # Verifica secrets reais
+    proxy: ""  # Herda de WAF
+    rate_limit: 0  # Herda de WAF
+    concurrency: 0  # Herda de engine
+    json_output: true
+    extra_args:
+      - "--only-verified"  # Foca em secrets confirmados
+      - "--exclude-paths .git"  # Ignora dirs sensíveis
+engine:
+  proxy:
+    enabled: true
+    address: "socks5://127.0.0.1:9050"
+  max_parallel_tasks: 8
+  temp_dir: "/mnt/dexter_storage/redrecon_tmp"
+  discord:
+    enabled: true
+    token: 
+    prefix: "!"
+    webhook_url: ""
+    default_channel_id: ""
+    security:                 
+      enabled: false
+      whitelist_users:               
+      - ""    
+      allowed_roles:                  
+      - ""
+      deny_message: "Você não tem permissão chefia."  
+      log_unauthorized: true
+  waf:
+    enabled: true
+    default_profile: "stealth" # Perfil padrão a ser usado
+    profiles: # Mapa de perfis de WAF
+      stealth: # Nome do perfil, corresponde a default_profile
+        rate_limit: 5
+        concurrency: 3
+        proxy_file: ""
+        proxies: # Lista de proxies para este perfil
+          - "socks5://127.0.0.1:9050"
+          - "http://proxy1.corp:3128"
+      aggressive: # Outro perfil disponível
+        rate_limit: 5
+        concurrency: 3
+        proxy_file: "/opt/proxies/aggressive.txt"
+
+recon:
+  web:
+    enabled: true
+    depth: 4
+    concurrency: 0
+    proxy: ""
+    extra_args: []  # ex.: ["-ignore-ext .pdf"]
+  subzy:
+    enabled: true
+  naabu:
+    enabled: true
+  subfinder:
+    enabled: true
+    all: true
+    threads: 50
+    proxy: ""
+    extra_args: ["-timeout 30", "-max-time 600"]
+  amass:
+    enabled: true
+    passive: true
+    timeout: 15
+    extra_args: ["-noalts", "-nolocals"]
+  sublist3r:
+    enabled: true
+    threads: 10
+    extra_args: ["-v"]
+  assetfinder:
+    enabled: true
+    extra_args: []
+  chaos:
+    enabled: true
+    api_key: ""
+    extra_args: []
+  enum4linux-ng:
+    enabled: true
+  certspotter:
+    enabled: true
+    extra_args: []
+  shuffledns:
+    enabled: true
+    wordlist: "/t"
+    extra_args: []
+  crt:
+    enabled: true
+    extra_args: []
+  crt_db:
+    enabled: true
+    extra_args: []
+  httpx:
+    enabled: true
+    threads: 50
+    proxy: ""
+    extra_args: ["-status-code"]
+  katana:
+    enabled: true
+    depth: 5
+    proxy: ""
+    extra_args: ["-silent"]
+  gau:
+    enabled: true
+    extra_args: ["--subs"]
+  kiterunner:
+    enabled: true
+    extra_args: ["-A=apiroutes-211028:2.3.1"]
+  wafw00f:
+    enabled: true
+    proxy: ""
+    extra_args: []
+  cve_search:
+    enabled: true
+    extra_args: []    
+  nuclei:
+    enabled: true
+    groups:
+      cve:          ["cve"]
+      misconfig:    ["misconfig"]      # misconfigurations
+      exposure:     ["exposure"]       # exposed panels, files, etc.
+      wordpress:    ["wordpress"]      # WP-specific
+      joomla:       ["joomla"]
+      drupal:       ["drupal"]
+      apache:       ["apache"]
+      iis:          ["iis"]
+      nginx:        ["nginx"]
+      php:          ["php"]
+      java:         ["java"]
+      nodejs:       ["nodejs"]
+      cloud:        ["cloud"]          # AWS, Azure, GCP
+      api:          ["api"]            # generic API checks
+      graphql:      ["graphql"]
+      ssti:         ["ssti"]
+      xss:          ["xss"]
+      sqli:         ["sql-injection"]
+      lfi:          ["lfi"]
+      rce:          ["rce"]
+      default:      ["cve","exposure","misconfig"]
+    templates:
+      - technologies
+      - vulnerabilities
+      - cves
+      - default-logins
+      - cloud
+    owasp_templates:
+      - "http/vulnerabilities/access-control/"
+      - "http/vulnerabilities/command-injection/"
+      - "http/vulnerabilities/xss/"
+    monitor_templates: []  # Para scans contínuos (ex.: ["monitoring/"])
+    proxy: ""              # Vazio = herda de WAF
+    rate_limit: 0          # 0 = usa perfil WAF
+    concurrency: 8         # 0 = usa engine.max_parallel_tasks
+    aggressive: false      # Ativa templates de risco alto
+    headless: true         # Modo batch
+    json_output: true      # Facilita parsing
+    extra_args:
+      - "-severity high,critical"  # Foca em severidades altas
+      - "-stats"                   # Estatísticas no output
+  enum4linux_ng:
+    enabled: true
+    threads: 10
+  bbot:
+    enabled: true
+    # === PRESETS (usando -p) ===
+    presets:
+      - subdomain-enum
+      - web-basic
+      - spider
+      - email-enum
+
+    # === FLAGS (usando -f) ===
+    flags:
+      - passive           # opcional: só fontes passivas
+      - safe              # evita módulos agressivos
+      - aggressive      # descomente se quiser
+
+    # === MÓDULOS ESPECÍFICOS (usando -m) ===
+    modules:
+      - ajaxpro
+      - aspnet_bin_exposure
+      - baddns
+      - baddns_direct
+      - baddns_zone
+      - badsecrets
+      - bucket_amazon
+      - bucket_azure
+      - bucket_digitalocean
+      - bucket_firebase
+      - bucket_google
+      - bypass403
+      - dnsbrute
+      - dnsbrute_mutations
+      - dnscommonsrv
+      - dotnetnuke
+      - ffuf
+      - ffuf_shortnames
+      - filedownload
+      - fingerprintx
+      - generic_ssrf
+      - git
+      - gitlab
+      - gowitness
+      - graphql_introspection
+      - host_header
+      - httpx
+      - hunt
+      - iis_shortnames
+      - lightfuzz
+      - medusa
+      - newsletters
+      - ntlm
+      - nuclei
+      - oauth
+      - paramminer_cookies
+      - paramminer_getparams
+      - paramminer_headers
+      - portscan
+      - reflected_parameters
+      - retirejs
+      - robots
+      - securitytxt
+      - smuggler
+      - sslcert
+      - telerik
+      - url_manipulation
+      - vhost
+      - wafw00f
+      - wappalyzer
+      - wpscan
+      - affiliates
+      - anubisdb
+      - apkpure
+      - asn
+      - azure_realm
+      - azure_tenant
+      - bevigil
+      - bucket_file_enum
+      - bufferoverrun
+      - builtwith
+      - c99
+      - certspotter
+      - chaos
+      - code_repository
+      - credshed
+      - crt
+      - crt_db
+      - dehashed
+      - digitorus
+      - dnsbimi
+      - dnscaa
+      - dnsdumpster
+      - dnstlsrpt
+      - docker_pull
+      - dockerhub
+      - emailformat
+      - extractous
+      - fullhunt
+      - git_clone
+      - gitdumper
+      - github_codesearch
+      - github_org
+      - github_usersearch
+      - github_workflows
+      - google_playstore
+      - hackertarget
+      - hunterio
+      - ip2location
+      - ipneighbor
+      - ipstack
+      - jadx
+      - leakix
+      - myssl
+      - otx
+      - passivetotal
+      - pgp
+      - portfilter
+      - postman
+      - postman_download
+      - rapiddns
+      - securitytrails
+      - shodan_dns
+      - shodan_idb
+      - sitedossier
+      - skymem
+      - social
+      - subdomaincenter
+      - subdomainradar
+      - trickest
+      - trufflehog
+      - urlscan
+      - viewdns
+      - virustotal
+      - wayback
+      - asset_inventory
+      - csv
+      - discord
+      - emails
+      - http
+      - json
+      - mysql
+      - neo4j
+      - nmap_xml
+      - postgres
+      - python
+      - slack
+      - splunk
+      - sqlite
+      - stdout
+      - subdomains
+      - teams
+      - txt
+      - web_parameters
+      - web_report
+      - websocket
+      - cloudcheck
+      - dnsresolve
+      - aggregate
+      - excavate
+      - speculate
+      - unarchive
+  vuln_check:
+    description: "Vulnerability checking (nuclei, wpscan, etc.)"
+    bbot:
+      modules: ${modules_groups.vuln_check}
+      flags: [active, aggressive, web-thorough]
+      output_modules: [json, web_report]
+  cloud:
+    description: "Cloud enumeration (buckets, tenants, etc.)"
+    bbot:
+      modules: ${modules_groups.cloud}
+      flags: [passive, cloud-enum, safe]
+      output_modules: [json]
+  bypass:
+    description: "Bypass techniques (403, smuggling, etc.)"
+    bbot:
+      modules: ${modules_groups.bypass}
+      flags: [active, aggressive, web-thorough]
+      output_modules: [json]
+  downloadfiles:
+    description: "File downloads (apk, files, etc.)"
+    bbot:
+      modules: ${modules_groups.downloadfiles}
+      flags: [passive, safe]
+      output_modules: [json]
+  git:
+    description: "Git-related (repos, gitlab)"
+    bbot:
+      modules: ${modules_groups.git}
+      flags: [code-enum, safe]
+      output_modules: [json]
+  graphql:
+    description: "GraphQL introspection"
+    bbot:
+      modules: ${modules_groups.graphql}
+      flags: [active, safe, web-basic]
+      output_modules: [json]
+  hunt:
+    description: "Parameter hunting"
+    bbot:
+      modules: ${modules_groups.hunt}
+      flags: [active, safe, web-thorough]
+      output_modules: [json]
+  fuzz:
+    description: "Fuzzing (ffuf, vhost, etc.)"
+    bbot:
+      modules: ${modules_groups.fuzz}
+      flags: [active, aggressive, deadly]
+      output_modules: [json]
+  newsletter:
+    description: "Newsletter submissions"
+    bbot:
+      modules: ${modules_groups.newsletter}
+      flags: [active, safe]
+      output_modules: [json]
+  paramminer:
+    description: "Parameter mining (headers, cookies, etc.)"
+    bbot:
+      modules: ${modules_groups.paramminer}
+      flags: [active, aggressive, slow, web-paramminer]
+      output_modules: [json]
+evasion:
+  enabled: true
+  use_tor: true
+  tor_proxy_address: "socks5://127.0.0.1:9050"
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/118.0"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/118.0"
+    - "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/118.0"
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edg/118.0.2088.61 Safari/537.36"
+monitor:
+  enabled: true
+  frequency: "6h"                   # Ciclos principais
+  update_freq: "24h"                # Auto-update templates
+  notify_on_new: true               # Alertas Discord
+  auto_escalate: true               # Prosseguir para pentest se critical
+  ai_threshold: 0.7                 # Score AI para escalar (ex.: pkg/ai.AnalyzeOutput)
+  bbot_rotation:                    # Rotação inicial (dinâmica sobrepõe)
+    - "recon/scans/maximum"
+    - "recon/scans/light"
+  nuclei_lfr_group: "bugbounty-lfr" # Grupo focado
+  baseline_file: "monitor_baseline.json" # Para diffs
+
+nuclei:
+  templates_groups: # Corrigido: movido para dentro de nuclei
+    bugbounty-lfr: # Corrigido: lista de templates adicionada aqui
+      - "http/vulnerabilities/"
+      - "http/misconfiguration/exposed-panels.yaml"
+      - "http/takeovers/"
+      - "http/exposures/"
+
+orchestration:
+  attackmate:
+    enabled: true
+    path: ""
+    playbooks:
+      - playbooks/recon-to-exploit.yaml
+      - playbooks/vuln-to-c2.yaml
+    rate_limit: 0
+    proxy: ""
+  sliver:
+    enabled: true
+    path: "/usr/local/bin/sliver"
+    server_addr: "127.0.0.1:31337"
+    operator: ""
+    lhost: ""
+metasploit:
+  enabled: true
+  host: 127.0.0.1:55552 #"http://127.0.0.1:55553/api/"
+  pass: "msfpass"
+  timeout: 30s
+  retry: 3
+  auto_escalate: true
+  modules:                              # ← 30 MÓDULOS PRONTOS PARA COPIAR-COLAR
+    # === WINDOWS (SMB, RDP, IIS) ===
+    windows:
+      - "exploit/windows/smb/ms17_010_eternalblue"      # EternalBlue (CRITICAL)
+      - "exploit/windows/rdp/cve_2019_0708_bluekeep"    # BlueKeep RDP
+      - "exploit/windows/iis/iis_webdav_scstoragepathfromurl"
+
+    # === WORDPRESS (RCE + plugins) ===
+    wordpress:
+      - "exploit/unix/webapp/wp_admin_shell_upload"     # RCE via upload
+      - "exploit/multi/http/wp_reflex_gallery_upload"  # Reflex Gallery
+      - "exploit/multi/http/wp_wpscan_enum"             # Enum + brute (aux)
+
+    # === APACHE / TOMCAT ===
+    apache:
+      - "exploit/multi/http/apache_mod_cgi_bash_env_exec" # ShellShock
+      - "exploit/multi/http/tomcat_mgr_upload"           # Manager upload
+      - "exploit/multi/http/tomcat_jsp_upload_bypass"    # Bypass auth
+      - "exploit/multi/http/tomcat_partial_put_deserialization" # CVE-2025-24813
+
+    # === IIS ===
+    iis:
+      - "exploit/windows/iis/ms15_034_httpreq"           # DoS → RCE
+      - "exploit/windows/iis/iis_webdav_scstoragepathfromurl"
+
+    # === JAVA / STRUTS / JENKINS ===
+    java:
+      - "exploit/multi/http/struts2_rest_xstream"        # Struts2 RCE
+      - "exploit/multi/http/jenkins_script_console"     # Jenkins Groovy
+      - "exploit/multi/http/apache_struts2_content_type_ognl"
+
+    # === GITLAB / GIT ===
+    gitlab:
+      - "exploit/multi/http/gitlab_user_enum"
+      - "exploit/multi/http/gitlab_wiki_rce"
+
+    # === JOOMLA / DRUPAL ===
+    joomla:
+      - "exploit/multi/http/joomla_http_header_rce"
+    drupal:
+      - "exploit/unix/webapp/drupal_drupalgeddon2"       # Drupalgeddon-2
+
+    # === PHP (PHP-CGI, Laravel) ===
+    php:
+      - "exploit/multi/http/php_cgi_arg_injection"
+      - "exploit/multi/http/laravel_token_unserialize_rce"
+
+    # === NODEJS / EXPRESS ===
+    nodejs:
+      - "auxiliary/scanner/http/node_js_debugger"
+
+    # === CLOUD / K8S ===
+    cloud:
+      - "auxiliary/scanner/http/kubernetes_api_server"
+      - "exploit/multi/http/kubelet_rbac_rce"
+
+    # === DEFAULT (recon + low-hanging) ===
+    default:
+      - "auxiliary/scanner/http/http_version"           # Banner grab
+      - "auxiliary/scanner/http/dir_listing"            # Open dirs
+      - "auxiliary/scanner/http/robots_txt"             # Robots
+      - "auxiliary/scanner/ssl/openssl_heartbleed"      # Heartbleed
