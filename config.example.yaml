@@ -1,0 +1,481 @@
+targets:
+  # Esta seção é um placeholder para guiar a implementação no script principal.
+  # O script que utiliza este YAML deve ser capaz de ler alvos de múltiplas fontes.
+  # Exemplo de uso no script principal:
+  #
+  # 1. Arquivo de alvos:
+  #    python main.py --targets-file /path/to/targets.txt
+  #
+  # 2. Alvo único ou múltiplos na linha de comando:
+  #    python main.py -t evilcorp.com 1.2.3.4 1.2.3.0/24 https://evilcorp.com ORG:evilcorp FILESYSTEM:/tmp/evil
+  #
+  # O script deverá passar esses alvos para as ferramentas configuradas, como o bbot.
+  # Ex: bbot -t evilcorp.com -t 1.2.3.4 --preset recon_light ...
+  file: "" # Caminho para um arquivo .txt contendo uma lista de alvos (um por linha)
+  list: [] # Lista de alvos passados diretamente via linha de comando
+
+api_keys:
+  github: ""
+  chaos: ""
+  securitytrails: ""
+  shodan: ""
+  binaryedge: ""
+  censys: ""
+  certspotter: ""
+  passivetotal: ""
+
+tools:
+  bbot:
+    enabled: false
+    config_file: ""  # Será gerado automaticamente
+    modules:
+      - "subdomain-enum"
+      - "portscan"
+      - "web-basic"
+      - "vulnscan"
+      - "cloudcheck"
+      - "excavate"
+      - "speculate"
+      - "unarchive"
+      - "apk"
+      - "docker"
+    output_modules: ["json"]
+    extra_args: ["--allow-deadly", "--quiet", "--auto-start"]
+  crackmapexec:
+    enabled: true
+    protocol: "smb"
+    extra_args: ["--gen-relay-list relay_targets.txt"]
+  bloodhound:
+    enabled: false
+    collection_method: "All" # Métodos: Default, All, DCOnly, LoggedOn, Trusts, ACL, ObjectProps, etc.
+    extra_args: ["-ns"] # Ex: --nameserver
+  certipy:
+    enabled: false
+    extra_args: ["-vulnerable"]
+  impacket:
+    enabled: true
+    extra_args: []
+  httpx:
+    tech_detect: true
+    enabled: true
+  nmap: /usr/bin/nmap
+  sqlmap:
+    enabled: true
+    proxy: http://127.0.0.1:8080
+    level: 3
+    risk: 2
+    extra_args: ["-A -Pn --top-ports 100000 --min-rate 1000 -T3 -sS -sV"]
+  
+  nikto:
+    enabled: false
+    pause_seconds: 0
+    proxy: http://127.0.0.1:8080
+    extra_args: ["-nolookup json"]
+  enum4linux:
+    enabled: true
+    threads: 10
+  ffuf:
+    enabled: true
+    rate_limit: 0
+    proxy: http://127.0.0.1:8080
+    extra_args: ["-ac"]
+  dirsearch:
+    enabled: true
+    threads: 0
+    proxy: http://127.0.0.1:8080
+    extra_args: ["-r"]
+  feroxbuster:
+    enabled: true
+    threads: 50
+    proxy: http://127.0.0.1:8080
+    extra_args: ["-q"]
+  gobuster:
+    enabled: true
+    threads: 50
+    proxy: http://127.0.0.1:8080
+    extra_args: ["-q"]
+  dalfox:
+    enabled: true
+    proxy: http://127.0.0.1:8080
+    extra_args: ["--silence"]
+  paramspider:
+    enabled: true
+    proxy: http://127.0.0.1:8080
+    extra_args: []
+  subzy:
+    enabled: true
+    extra_args: ["--hide_fails"]
+  arjun:
+    enabled: true
+    extra_args: []
+  trufflehog:
+    enabled: true
+    path: ""  # Vazio = herda de resultsPath/web/assets
+    entropy: true
+    rules: ""  # Custom rules
+    no_verify: false  # Verifica secrets reais
+    proxy: http://127.0.0.1:8080
+    rate_limit: 0  # Herda de WAF
+    concurrency: 0  # Herda de engine
+    json_output: true
+    extra_args:
+      - "--only-verified"  # Foca em secrets confirmados
+      - "--exclude-paths .git"  # Ignora dirs sensíveis
+engine:
+  proxy: http://127.0.0.1:8080
+  enabled: true
+  address: http://127.0.0.1:8080
+  max_parallel_tasks: 8
+  temp_dir: "/tmp/redrecon_tmp"
+  discord:
+    enabled: false
+    token: ""
+    prefix: "!"
+    webhook_url: ""
+    default_channel_id: ""
+    security:                 
+      enabled: false
+      whitelist_users:               
+      - "000000000000000000"    
+      allowed_roles:                  
+      - "000000000000000000"
+      deny_message: "Access Denied."  
+      log_unauthorized: true
+  waf:
+    enabled: true
+    default_profile: "stealth" # Perfil padrão a ser usado
+    profiles: # Mapa de perfis de WAF
+      stealth: # Nome do perfil, corresponde a default_profile
+        rate_limit: 5
+        concurrency: 3
+        proxy_file: ""
+        proxies: # Lista de proxies para este perfil
+          - http://127.0.0.1:8080
+          - "http://proxy1.corp:3128"
+      aggressive: # Outro perfil disponível
+        rate_limit: 5
+        concurrency: 3
+        proxy_file: "/opt/proxies/aggressive.txt"
+
+recon:
+  bbot:
+    profile: "web-thorough"           # Preset oficial: httpx + wappalyzer + robots + dirsearch + paramminer
+    modules: []                       # Usa todo o preset
+    flags:
+      - subdomain-enum
+      - web-screenshots
+      - port-scan
+    config:
+      web:
+        spider_distance: 2
+        spider_depth: 3
+      output:
+        modules:
+          - ndjson
+          - txt
+      modules:
+        gowitness:
+          resolution_x: 1920
+          resolution_y: 1080
+  nikto:
+    enabled: true                     # Liga/desliga a ferramenta
+    output_format: "json"             # Força JSON para parsing
+    output_file: "nikto_findings.json" # Nome do arquivo de saída
+    proxy: http://127.0.0.1:8080
+    tuning: "1234567890"              # Todos os testes de tuning
+    maxtime: 300                      # Tempo máximo por host (segundos)
+    evasion: "1"                      # Técnica de evasão (ex: "1" para LibWhisker)
+    pause_seconds: 2                  # Pausa entre os testes (segundos)
+    follow_redirects: true            # Segue redirecionamentos 3xx
+    mutate: "1,2,3"                   # Tipos de mutação de teste
+    timeout: 30                       # Timeout por requisição (segundos)
+  web:
+    enabled: true
+    depth: 4
+    concurrency: 0
+    proxy: http://127.0.0.1:8080
+    extra_args: []  # ex.: ["-ignore-ext .pdf"]
+  subzy:
+    enabled: true
+  naabu:
+    enabled: true
+  subfinder:
+    enabled: true
+    all: true
+    threads: 50
+    proxy: http://127.0.0.1:8080
+    extra_args: ["-timeout 30", "-max-time 600"]
+  amass:
+    enabled: true
+    passive: true
+    timeout: 15
+    extra_args: ["-noalts", "-nolocals"]
+  sublist3r:
+    enabled: true
+    threads: 50
+    extra_args: ["-v"]
+  assetfinder:
+    enabled: true
+    extra_args: []
+  chaos:
+    enabled: true
+    api_key: ""
+    extra_args: []
+  certspotter:
+    enabled: true
+    extra_args: []
+  shuffledns:
+    enabled: true
+    wordlist: "/usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt"
+    extra_args: []
+  crt:
+    enabled: true
+    extra_args: []
+  crt_db:
+    enabled: true
+    extra_args: []
+  httpx:
+    enabled: true
+    threads: 50
+    proxy: http://127.0.0.1:8080
+    extra_args: ["-status-code"]
+  katana:
+    enabled: true
+    depth: 5
+    proxy: http://127.0.0.1:8080
+    extra_args: ["-silent"]
+  gau:
+    enabled: true
+    extra_args: ["--subs"]
+  kiterunner:
+    enabled: true
+    extra_args: ["-A=apiroutes-211028:2.3.1"]
+  wafw00f:
+    enabled: true
+    proxy: http://127.0.0.1:8080
+    extra_args: []
+  cve_search:
+    enabled: true
+    extra_args: []    
+  nuclei:
+    enabled: true
+    templates:
+      - technologies
+      - vulnerabilities
+      - cves
+      - default-logins
+      - cloud
+    owasp_templates:
+      - "http/vulnerabilities/access-control/"
+      - "http/vulnerabilities/command-injection/"
+      - "http/vulnerabilities/xss/"
+    monitor_templates: []  # Para scans contínuos (ex.: ["monitoring/"])
+    concurrency: 8
+    rate_limit: 50
+    headless: true
+    update_templates: true
+    silent: true
+    timeout: 900 # 15 minutos em segundos
+  enum4linux:
+    enabled: true
+    threads: 10
+  amass-args: "-passive -noalts -nolocals"
+  subfinder-args: "-all -silent"
+
+wordlists:
+  subdomains: "/usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt"
+  fuzzing: "/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt"
+
+# ... outras configurações ...
+
+apikeys:
+  gemini: ""
+
+ai:
+  provider: gemini 
+  model: gemini-2.5-flash
+
+tool_paths:
+  subfinder: "subfinder"
+  httpx: "httpx"
+  shuffledns: "shuffledns"
+  katana: "katana"
+  nuclei: "nuclei"
+  nikto: "nikto"
+  ffuf: "ffuf"
+  bbot: "bbot"
+  dirsearch: "dirsearch"
+  sublist3r: "sublist3r"
+  amass: "amass"
+  wafw00f: "wafw00f"
+  dalfox: "dalfox"
+  assetfinder: "assetfinder"
+  feroxbuster: "feroxbuster"
+  paramspider: "paramspider"
+  dnsx: "dnsx"
+  naabu: "naabu"
+  crackmapexec: "netexec"
+  svmap: "svmap"
+  cloudenum: "cloudenum"
+  sslscan: "sslscan"
+  subzy: "subzy"
+  attackmate: "attackmate"
+  sliver: "sliver"
+  enum4linux: "enum4linux"
+
+infra:
+  nmap-args: >-
+    -sS
+    -T2
+    --max-retries 1
+    --scan-delay 500ms
+    -f
+    --data-length 24
+    --spoof-mac 0
+
+api:
+  ffuf-args: >-
+    -ac
+    -maxtime 300
+    -recursion
+    -recursion-depth 1
+  kiterunner-args: >-
+    -A=apiroutes-211028:2.3.1
+    --fail-status-codes 400,404,500
+    --delay 500ms
+
+presets:
+      flags:
+  # Os presets do BBOT foram movidos para arquivos YAML individuais
+  # dentro de um diretório 'presets/'.
+  # O script principal deve carregar dinamicamente os presets deste diretório.
+  # Exemplo de estrutura de diretório:
+  # /
+  # |-- config.yaml
+  # |-- main.py
+  # |-- presets/
+  # |   |-- recon_light.yaml
+  # |   |-- recon_heavy.yaml
+  # |   |-- ... (outros presets)
+bbot_presets_dir: "~/.bbot/presets"
+
+evasion:
+  enabled: true
+  use_tor: true
+  tor_proxy_address: http://127.0.0.1:9050
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/118.0"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/118.0"
+    - "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/118.0"
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edg/118.0.2088.61 Safari/537.36"
+monitor:
+  enabled: true
+  frequency: "2h"                   # Ciclos principais
+  update_freq: "24h"                # Auto-update templates
+  notify_on_new: true               # Alertas Discord
+  auto_escalate: true               # Prosseguir para pentest se critical
+  ai_threshold: 0.7                 # Score AI para escalar (ex.: pkg/ai.AnalyzeOutput)
+  bbot_rotation:                    # Rotação inicial (dinâmica sobrepõe)
+    - "recon/scans/maximum"
+    - "recon/scans/light"
+  nuclei_lfr_group: "bugbounty-lfr" # Grupo focado
+  baseline_file: "monitor_baseline.json" # Para diffs
+
+nuclei:
+  templates_groups: # Corrigido: movido para dentro de nuclei
+    bugbounty-lfr: # Corrigido: lista de templates adicionada aqui
+      - "http/vulnerabilities/"
+      - "http/misconfiguration/exposed-panels.yaml"
+      - "http/takeovers/"
+      - "http/exposures/"
+
+orchestration:
+  attackmate:
+    enabled: true
+    path: "attackmate"
+    playbooks:
+      - playbooks/recon-to-exploit.yaml
+      - playbooks/vuln-to-c2.yaml
+    rate_limit: 0
+    proxy: http://127.0.0.1:8080
+  sliver:
+    enabled: true
+    path: "/usr/local/bin/sliver"
+    server_addr: "127.0.0.1:31337"
+    operator: "redteam"
+    lhost: "0.0.0.0"
+metasploit:
+  enabled: true
+  host: "127.0.0.1:55553" #"http://127.0.0.1:55553/api/"	
+  user: "msf"
+  pass: "msfpass"
+  lhost: "127.0.0.1"
+  lport: "4444"
+  timeout: 30s
+  retry: 3
+  auto_escalate: true
+  modules:                              # ← 30 MÓDULOS PRONTOS PARA COPIAR-COLAR
+    # === WINDOWS (SMB, RDP, IIS) ===
+    windows:
+      - "exploit/windows/smb/ms17_010_eternalblue"      # EternalBlue (CRITICAL)
+      - "exploit/windows/rdp/cve_2019_0708_bluekeep"    # BlueKeep RDP
+      - "exploit/windows/iis/iis_webdav_scstoragepathfromurl"
+
+    # === WORDPRESS (RCE + plugins) ===
+    wordpress:
+      - "exploit/unix/webapp/wp_admin_shell_upload"     # RCE via upload
+      - "exploit/multi/http/wp_reflex_gallery_upload"  # Reflex Gallery
+      - "exploit/multi/http/wp_wpscan_enum"             # Enum + brute (aux)
+
+    # === APACHE / TOMCAT ===
+    apache:
+      - "exploit/multi/http/apache_mod_cgi_bash_env_exec" # ShellShock
+      - "exploit/multi/http/tomcat_mgr_upload"           # Manager upload
+      - "exploit/multi/http/tomcat_jsp_upload_bypass"    # Bypass auth
+      - "exploit/multi/http/tomcat_partial_put_deserialization" # CVE-2025-24813
+
+    # === IIS ===
+    iis:
+      - "exploit/windows/iis/ms15_034_httpreq"           # DoS → RCE
+      - "exploit/windows/iis/iis_webdav_scstoragepathfromurl"
+
+    # === JAVA / STRUTS / JENKINS ===
+    java:
+      - "exploit/multi/http/struts2_rest_xstream"        # Struts2 RCE
+      - "exploit/multi/http/jenkins_script_console"     # Jenkins Groovy
+      - "exploit/multi/http/apache_struts2_content_type_ognl"
+
+    # === GITLAB / GIT ===
+    gitlab:
+      - "exploit/multi/http/gitlab_user_enum"
+      - "exploit/multi/http/gitlab_wiki_rce"
+
+    # === JOOMLA / DRUPAL ===
+    joomla:
+      - "exploit/multi/http/joomla_http_header_rce"
+    drupal:
+      - "exploit/unix/webapp/drupal_drupalgeddon2"       # Drupalgeddon-2
+
+    # === PHP (PHP-CGI, Laravel) ===
+    php:
+      - "exploit/multi/http/php_cgi_arg_injection"
+      - "exploit/multi/http/laravel_token_unserialize_rce"
+
+    # === NODEJS / EXPRESS ===
+    nodejs:
+      - "auxiliary/scanner/http/node_js_debugger"
+
+    # === CLOUD / K8S ===
+    cloud:
+      - "auxiliary/scanner/http/kubernetes_api_server"
+      - "exploit/multi/http/kubelet_rbac_rce"
+
+    # === DEFAULT (recon + low-hanging) ===
+    default:
+      - "auxiliary/scanner/http/http_version"           # Banner grab
+      - "auxiliary/scanner/http/dir_listing"            # Open dirs
+      - "auxiliary/scanner/http/robots_txt"             # Robots
+      - "auxiliary/scanner/ssl/openssl_heartbleed"      # Heartbleed
